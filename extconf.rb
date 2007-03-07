@@ -26,9 +26,9 @@ compat_functions = %w(PQescapeString PQexecParams)
 if have_build_env
   required_libraries.each(&method(:have_library))
   desired_functions.each(&method(:have_func))
-  $objs = ['postgres.o'] if compat_functions.all?(&method(:have_func))
+  $objs = ['pg.o'] if compat_functions.all?(&method(:have_func))
   $CFLAGS << ' -Wall '
-  create_makefile("postgres")
+  create_makefile("pg")
 else
   puts 'Could not find PostgreSQL build environment (libraries & headers): Makefile not created'
 end

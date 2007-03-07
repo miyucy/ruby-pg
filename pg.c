@@ -1,6 +1,6 @@
 /************************************************
 
-  postgres.c -
+  pg.c -
 
   Author: matz 
   created at: Tue May 13 20:07:35 JST 1997
@@ -2613,7 +2613,7 @@ pgrow_to_hash(self)
  * The class to access PostgreSQL database.
  *
  * For example, to send query to the database on the localhost:
- *    require 'postgres'
+ *    require 'pg'
  *    conn = PGconn.open('dbname' => 'test1')
  *    res  = conn.exec('select * from a')
  *
@@ -2650,7 +2650,7 @@ pgrow_to_hash(self)
  */
 
 void
-Init_postgres()
+Init_pg()
 {
     pg_gsub_bang_id = rb_intern("gsub!");
     pg_escape_regex = rb_reg_new("([\\t\\n\\\\])", 10, 0);
