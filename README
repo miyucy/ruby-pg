@@ -1,10 +1,32 @@
-        The extension for PostgreSQL access  version 0.7.1
+================================================================================
+ruby-pg: Ruby interface to PostgreSQL RDBMS
+================================================================================
 
-                                                 Yukihiro Matsumoto
-						     Eiji Matsumoto
+This library is copyrighted by the authors.
 
-                                    maintainer:    Noboru Saitou
-- What's this ?
+Authors:
+  * Yukihiro Matsumoto <matz@ruby-lang.org>
+      Author of Ruby.
+  * Eiji Matsumoto <usagi@ruby.club.or.jp>
+      One of users who loves Ruby.
+  * Jeff Davis <ruby@j-davis.com>
+
+Thanks to:
+  * Noboru Saitou <noborus@netlab.jp>
+      Past maintainer.
+  * Dave Lee
+      Past maintainer.
+  * Guy Decoux   ts <decoux@moulon.inra.fr> 
+  
+Maintainer:
+  Jeff Davis <ruby@j-davis.com>
+
+Copying:
+  You may redistribute this software under the terms of the GPL,
+  included in the file named GPL; or under the same terms as Ruby,
+  included in the file name LICENSE.
+
+- Summary
 
 This is the extension library to access a PostgreSQL database from Ruby.
 This library works with PostgreSQL 6.5/7.0/7.1/7.2; it probably works 
@@ -144,28 +166,4 @@ And to the people who developed PostgreSQL.
 
 This library is copyrighted by its authors; Yukihiro Matsumoto, and Eiji
 Matsumoto.
-
-You can redistribute This library and/or modify it under the same term
-of Ruby.  License of Ruby is included with Ruby distribution in
-the file "README".
-
-Please ask Noboru Saitou. Because I am maintainer currently.
-
-- Authors
-
- Yukihiro Matsumoto <matz@ruby-lang.org>
-  Author of Ruby.
-
- Eiji Matsumoto <usagi@ruby.club.or.jp>
-  One of users who loves Ruby.
-
-No, we are not literal brothers :-)
-
-- Special Thanks
-
- Guy Decoux   ts <decoux@moulon.inra.fr> 
-
-- maintainer
-
- Noboru Saitou <noborus@netlab.jp>
 
