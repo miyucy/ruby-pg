@@ -107,6 +107,7 @@ pgconn_alloc(klass)
 }
 
 static int build_key_value_string_i(VALUE key, VALUE value, VALUE result);
+static PGconn *get_pgconn(VALUE obj);
 
 static PGconn *
 try_connectdb(arg)
@@ -199,16 +200,11 @@ pgconn_s_translate_results_set(self, fact)
     return fact;
 }
 
-static VALUE format_array_element(VALUE obj);
-
 static VALUE
 pgconn_s_format(self, obj)
     VALUE self;
     VALUE obj;
 {
-    VALUE result;
-    int tainted;
-    long i;
 
     switch(TYPE(obj)) {
     case T_STRING:
@@ -224,19 +220,6 @@ pgconn_s_format(self, obj)
     case T_NIL:
       return rb_str_new2("NULL");
 
-    case T_ARRAY:
-      result = rb_str_buf_new2("{");
-      tainted = OBJ_TAINTED(obj);
-      for (i = 0; i < RARRAY(obj)->len; i++) {
-          VALUE element = format_array_element(RARRAY(obj)->ptr[i]);
-          if (OBJ_TAINTED(RARRAY(obj)->ptr[i])) tainted = Qtrue;
-          if (i > 0) rb_str_buf_cat2(result, ", ");
-          rb_str_buf_append(result, element);
-      }
-      rb_str_buf_cat2(result, "}");
-      if (tainted) OBJ_TAINT(result);
-      return result;
-
     default:
       if (CLASS_OF(obj) == rb_cBigDecimal) {
           return rb_funcall(obj, rb_intern("to_s"), 1, rb_str_new2("F"));
@@ -249,18 +232,6 @@ pgconn_s_format(self, obj)
     }
 }
 
-static VALUE
-format_array_element(obj)
-    VALUE obj;
-{
-    if (TYPE(obj) == T_STRING) {
-        obj = rb_funcall(obj, rb_intern("gsub"), 2, rb_reg_new("(?=[\\\\\"])", 9, 0), rb_str_new2("\\"));
-        return rb_funcall(obj, rb_intern("gsub!"), 2, rb_reg_new("^|$", 3, 0), rb_str_new2("\""));
-    }
-    else {
-        return pgconn_s_format(rb_cPGconn, obj);
-    }
-}
 
 /*
  * call-seq:
@@ -302,6 +273,71 @@ pgconn_s_quote(self, obj)
     }
 }
 
+/*
+ * call-seq:
+ *    PGconn.quote( obj )
+ *    PGconn.quote( obj ) { |obj| ... }
+ *    PGconn.format( obj )
+ *    PGconn.format( obj ) { |obj| ... }
+ * 
+ * If _obj_ is a Number, String, Array, +nil+, +true+, or +false+ then
+ * #quote returns a String representation of that object safe for use in PostgreSQL.
+ * 
+ * If _obj_ is not one of the above classes and a block is supplied to #quote,
+ * the block is invoked, passing along the object. The return value from the
+ * block is returned as a string.
+ *
+ * If _obj_ is not one of the recognized classes andno block is supplied,
+ * a PGError is raised.
+ */
+static VALUE
+pgconn_quote(self, obj)
+    VALUE self, obj;
+{
+    char* quoted;
+    int size,error;
+    VALUE result;
+
+    if (TYPE(obj) == T_STRING) {
+        /* length * 2 because every char could require escaping */
+        /* + 2 for the quotes, + 1 for the null terminator */
+        quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
+        size = PQescapeStringConn(get_pgconn(self),quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len, &error);
+        *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
+        result = rb_str_new(quoted, size + 2);
+        OBJ_INFECT(result, obj);
+        return result;
+    }
+    else {
+        return pgconn_s_format(self, obj);
+    }
+}
+
+static VALUE
+pgconn_s_quote_connstr(string)
+    VALUE string;
+{
+    char *str,*ptr;
+    int i,j=0,len;
+    VALUE result;
+
+    Check_Type(string, T_STRING);
+    
+	ptr = RSTRING(string)->ptr;
+	len = RSTRING(string)->len;
+    str = ALLOCA_N(char, len * 2 + 2 + 1);
+	str[j++] = '\'';
+	for(i = 0; i < len; i++) {
+		if(ptr[i] == '\'' || ptr[i] == '\\')
+			str[j++] = '\\';
+		str[j++] = ptr[i];	
+	}
+	str[j++] = '\'';
+    result = rb_str_new(str, j);
+    OBJ_INFECT(result, string);
+    return result;
+}
+
 static int
 build_key_value_string_i(key, value, result)
     VALUE key, value, result;
@@ -310,15 +346,46 @@ build_key_value_string_i(key, value, result)
     if (key == Qundef) return ST_CONTINUE;
     key_value = (TYPE(key) == T_STRING ? rb_str_dup(key) : rb_obj_as_string(key));
     rb_str_cat(key_value, "=", 1);
-    rb_str_concat(key_value, pgconn_s_quote(rb_cPGconn, value));
+    rb_str_concat(key_value, pgconn_s_quote_connstr(value));
     rb_ary_push(result, key_value);
     return ST_CONTINUE;
 }
 
 /*
  * call-seq:
- *    PGconn.escape( str )
+ *    PGconn.quote_ident( str )
  *
+ * Returns a SQL-safe identifier.
+ */
+static VALUE
+pgconn_s_quote_ident(self, string)
+    VALUE self;
+    VALUE string;
+{
+    char *str,*ptr;
+    int i,j=0,len;
+    VALUE result;
+
+    Check_Type(string, T_STRING);
+    
+	ptr = RSTRING(string)->ptr;
+	len = RSTRING(string)->len;
+    str = ALLOCA_N(char, len * 2 + 2 + 1);
+	str[j++] = '"';
+	for(i = 0; i < len; i++) {
+		if(ptr[i] == '"')
+			str[j++] = '"';
+		else if(ptr[i] == '\0')
+			rb_raise(rb_ePGError, "Identifier cannot contain NULL bytes");
+		str[j++] = ptr[i];	
+	}
+	str[j++] = '"';
+    result = rb_str_new(str, j);
+    OBJ_INFECT(result, string);
+    return result;
+}
+
+/*
  * Returns a SQL-safe version of the String _str_. Unlike #quote, does not wrap the String in '...'.
  */
 static VALUE
@@ -326,7 +393,7 @@ pgconn_s_escape(self, string)
     VALUE self;
     VALUE string;
 {
-    char* escaped;
+    char *escaped;
     int size;
     VALUE result;
 
@@ -334,6 +401,27 @@ pgconn_s_escape(self, string)
     
     escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
     size = PQescapeString(escaped, RSTRING(string)->ptr, RSTRING(string)->len);
+    result = rb_str_new(escaped, size);
+    OBJ_INFECT(result, string);
+    return result;
+}
+
+/*
+ * Returns a SQL-safe version of the String _str_. Unlike #quote, does not wrap the String in '...'.
+ */
+static VALUE
+pgconn_escape(self, string)
+    VALUE self;
+    VALUE string;
+{
+    char *escaped;
+    int size,error;
+    VALUE result;
+
+    Check_Type(string, T_STRING);
+    
+    escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
+    size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING(string)->ptr, RSTRING(string)->len, &error);
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
     return result;
@@ -368,6 +456,44 @@ pgconn_s_escape_bytea(self, obj)
     from_len  = RSTRING(obj)->len;
     
     to = (char *)PQescapeBytea(from, from_len, &to_len);
+    
+    ret = rb_str_new(to, to_len - 1);
+    OBJ_INFECT(ret, obj);
+    
+    PQfreemem(to);
+    
+    return ret;
+}
+
+/*
+ * call-seq:
+ *   PGconn.escape_bytea( obj )
+ *
+ * Escapes binary data for use within an SQL command with the type +bytea+.
+ * 
+ * Certain byte values must be escaped (but all byte values may be escaped)
+ * when used as part of a +bytea+ literal in an SQL statement. In general, to
+ * escape a byte, it is converted into the three digit octal number equal to
+ * the octet value, and preceded by two backslashes. The single quote (') and
+ * backslash (\) characters have special alternative escape sequences.
+ * #escape_bytea performs this operation, escaping only the minimally required bytes.
+ * 
+ * See the PostgreSQL documentation on PQescapeBytea[http://www.postgresql.org/docs/current/interactive/libpq-exec.html#LIBPQ-EXEC-ESCAPE-BYTEA] for more information.
+ */
+static VALUE
+pgconn_escape_bytea(self, obj)
+    VALUE self;
+    VALUE obj;
+{
+    char *from, *to;
+    size_t from_len, to_len;
+    VALUE ret;
+    
+    Check_Type(obj, T_STRING);
+    from      = RSTRING(obj)->ptr;
+    from_len  = RSTRING(obj)->len;
+    
+    to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
     
     ret = rb_str_new(to, to_len - 1);
     OBJ_INFECT(ret, obj);
@@ -643,7 +769,7 @@ pgconn_async_exec(obj, str)
 
     Check_Type(str, T_STRING);
         
-    while ((result = PQgetResult(conn))) {
+    while ((result = PQgetResult(conn)) != NULL) {
         PQclear(result);
     }
 
@@ -2558,6 +2684,7 @@ Init_postgres()
     rb_define_singleton_method(rb_cPGconn, "escape_bytea", pgconn_s_escape_bytea, 1);
     rb_define_singleton_method(rb_cPGconn, "unescape_bytea", pgconn_s_unescape_bytea, 1);
     rb_define_singleton_method(rb_cPGconn, "translate_results=", pgconn_s_translate_results_set, 1);
+    rb_define_singleton_method(rb_cPGconn, "quote_ident", pgconn_s_quote_ident, 1);
 
     rb_define_const(rb_cPGconn, "CONNECTION_OK", INT2FIX(CONNECTION_OK));
     rb_define_const(rb_cPGconn, "CONNECTION_BAD", INT2FIX(CONNECTION_BAD));
@@ -2592,6 +2719,13 @@ Init_postgres()
     rb_define_method(rb_cPGconn, "transaction_status", pgconn_transaction_status, 0);
     rb_define_method(rb_cPGconn, "protocol_version", pgconn_protocol_version, 0);
     rb_define_method(rb_cPGconn, "server_version", pgconn_server_version, 0);
+    rb_define_method(rb_cPGconn, "escape", pgconn_escape, 1);
+    rb_define_method(rb_cPGconn, "escape_bytea", pgconn_escape_bytea, 1);
+    rb_define_method(rb_cPGconn, "unescape_bytea", pgconn_s_unescape_bytea, 1);
+    rb_define_method(rb_cPGconn, "quote", pgconn_quote, 1);
+    rb_define_method(rb_cPGconn, "quote_ident", pgconn_s_quote_ident, 1);
+    rb_define_alias(rb_cPGconn, "format", "quote");
+
     /* following line is for rdoc */
     /* rb_define_method(rb_cPGconn, "lastval", pgconn_lastval, 0); */
 
