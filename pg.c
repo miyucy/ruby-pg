@@ -15,7 +15,6 @@
 #include "ruby.h"
 #include "rubyio.h"
 #include "st.h"
-#include "intern.h"
 
 /* grep '^#define' $(pg_config --includedir)/server/catalog/pg_type.h | grep OID */
 #include "type-oids.h"
@@ -76,15 +75,19 @@ static VALUE rb_cPGresult;
 static VALUE rb_ePGError;
 static VALUE rb_cPGlarge; 
 static VALUE rb_cPGrow;
+static VALUE rb_cPGrowtype;
+static VALUE rb_cPGfield;
+static VALUE rb_cPGrecord;
+static VALUE rb_cPGbytea;
 
 static VALUE pgconn_lastval _((VALUE));
-static VALUE pgconn_close _((VALUE));
 static VALUE pgresult_fields _((VALUE));
 static VALUE pgresult_clear _((VALUE));
 static VALUE pgresult_result_with_clear _((VALUE));
 static VALUE pgresult_new _((PGresult*));
 
-static int translate_results = 0;
+static int translate_results = 1;
+static int parse_arrays = 1;
 
 /* Large Object support */
 typedef struct pglarge_object
@@ -108,6 +111,7 @@ pgconn_alloc(klass)
 
 static int build_key_value_string_i(VALUE key, VALUE value, VALUE result);
 static PGconn *get_pgconn(VALUE obj);
+static VALUE pgconn_close(VALUE self);
 
 static PGconn *
 try_connectdb(arg)
@@ -180,6 +184,9 @@ pgconn_connect(argc, argv, self)
     if (PQserverVersion(conn) >= 80100) {
         rb_define_singleton_method(self, "lastval", pgconn_lastval, 0);
     }
+    /* setup several instance vars for result translation/formatting */
+    rb_iv_set(self, "@array_types", rb_hash_new());
+    rb_iv_set(self, "@translators", rb_hash_new());
 
     Data_Set_Struct(self, conn);
     return self;
@@ -191,6 +198,11 @@ pgconn_connect(argc, argv, self)
  *
  * When true (default), results are translated to appropriate ruby class.
  * When false, results are returned as +Strings+.
+ * 
+ * There is number of built-in conversion rules, and custom translation
+ * can set, see #reg_translate, #reg_array, #parse_arrays=, #load_composite_types.
+ * 
+ * Custom translation is instance-specific.
  */
 static VALUE
 pgconn_s_translate_results_set(self, fact)
@@ -200,12 +212,50 @@ pgconn_s_translate_results_set(self, fact)
     return fact;
 }
 
+/*
+ * call-seq:
+ *   PGconn.parse_arrays = boolean
+ *
+ * When translate_results and parse_arrays are true (default), 
+ * results are translated to appropriate ruby class.
+ * Arrays of types int[], float[], numeric[], text[] are returned as ruby arrays
+ * with values of appropriate ruby class.
+ *
+ * It is possible to define array parsers for other types, using PGconn#reg_array instance method.
+ *
+ * When parse_arrays is false, results are returned as +Strings+.
+ *
+ */
+static VALUE
+pgconn_s_parse_arrays_set(self, fact)
+    VALUE self, fact;
+{
+    parse_arrays = (fact == Qfalse || fact == Qnil) ? 0 : 1;
+    return Qnil;
+}
+
+static VALUE format_array_element(VALUE self, VALUE obj);
+static VALUE pgconn_s_quote(VALUE self, VALUE obj);
+static VALUE pgconn_s_escape_bytea(VALUE self, VALUE obj);
+static VALUE find_user_reg_formatter(VALUE klass);
+
 static VALUE
 pgconn_s_format(self, obj)
     VALUE self;
     VALUE obj;
 {
-
+    VALUE result;
+    VALUE record_values;
+    int tainted;
+    long i;
+    VALUE user_form = find_user_reg_formatter( CLASS_OF(obj));
+    if( user_form != Qnil)
+      return rb_funcall(rb_ary_entry(user_form,0), rb_intern("call"), 1, obj);
+        
+    if( CLASS_OF(obj) == rb_cPGbytea) {
+      return  pgconn_s_escape_bytea(self, obj);
+    }
+    
     switch(TYPE(obj)) {
     case T_STRING:
       return obj;
@@ -220,56 +270,103 @@ pgconn_s_format(self, obj)
     case T_NIL:
       return rb_str_new2("NULL");
 
+    case T_ARRAY:
+      result = rb_str_buf_new2("{");
+      tainted = OBJ_TAINTED(obj);
+      for (i = 0; i < RARRAY(obj)->len; i++) {
+          VALUE element = format_array_element(self, RARRAY(obj)->ptr[i]);
+          if (OBJ_TAINTED(RARRAY(obj)->ptr[i])) tainted = Qtrue;
+          if (i > 0) rb_str_buf_cat2(result, ",");
+          rb_str_buf_append(result, element);
+      }
+      rb_str_buf_cat2(result, "}");
+      if (tainted) OBJ_TAINT(result);
+      return result;
+
     default:
       if (CLASS_OF(obj) == rb_cBigDecimal) {
           return rb_funcall(obj, rb_intern("to_s"), 1, rb_str_new2("F"));
       }
-      else if (rb_block_given_p()) {
+      if (CLASS_OF(obj) == rb_cPGrecord){
+        result = rb_str_buf_new2("(");
+        tainted = OBJ_TAINTED(obj);
+        record_values = rb_iv_get(obj, "@values");
+        VALUE prev_obj = Qnil;
+        for (i = 0; i < RARRAY(record_values)->len; i++) {
+          if (i > 0) rb_str_buf_cat2(result, ",");
+          VALUE cur_obj = RARRAY(record_values)->ptr[i];
+          if (Qnil != cur_obj) {
+              VALUE element = format_array_element(self, cur_obj);
+              if (OBJ_TAINTED(cur_obj)) tainted = Qtrue;
+              if (CLASS_OF(cur_obj) == rb_cPGrecord || TYPE(cur_obj) == T_ARRAY)
+                rb_str_buf_cat2(result, "\"");
+              rb_str_buf_append(result, element);
+              if (CLASS_OF(cur_obj) == rb_cPGrecord || TYPE(cur_obj) == T_ARRAY)
+                rb_str_buf_cat2(result, "\"");
+          }
+          prev_obj = cur_obj;
+        }
+        rb_str_buf_cat2(result, ")");
+        return result;
+      }
+      if (CLASS_OF(obj) == rb_cDate || CLASS_OF(obj) == rb_cDateTime || CLASS_OF(obj) == rb_cTime){
+        VALUE formatted_time = rb_funcall(obj, rb_intern("strftime"), 1, rb_str_new2("%Y-%m-%d %H:%M:%S"));
+        if( CLASS_OF(obj) == rb_cTime ) {
+          char usec[8];
+          sprintf(usec, ".%06ld", NUM2LONG(rb_funcall(obj, rb_intern("usec"),0)) );
+          rb_str_buf_cat(formatted_time, usec, 7);
+        }
+        return formatted_time;
+      }
+      if (rb_block_given_p()) {
           return rb_yield(obj);
       } else {
           rb_raise(rb_ePGError, "can't format");
       }
     }
 }
-
-
-/*
- * call-seq:
- *    PGconn.quote( obj )
- *    PGconn.quote( obj ) { |obj| ... }
- *    PGconn.format( obj )
- *    PGconn.format( obj ) { |obj| ... }
- * 
- * If _obj_ is a Number, String, Array, +nil+, +true+, or +false+ then
- * #quote returns a String representation of that object safe for use in PostgreSQL.
- * 
- * If _obj_ is not one of the above classes and a block is supplied to #quote,
- * the block is invoked, passing along the object. The return value from the
- * block is returned as a string.
- *
- * If _obj_ is not one of the recognized classes andno block is supplied,
- * a PGError is raised.
- */
+static size_t escape_array_string(char * from, char * to, size_t length)
+{
+	const char *source = from;
+	char	   *target = to;
+	size_t		remaining = length;
+	while (remaining > 0 && *source != '\0')
+	{
+		char	c = *source;
+		/* Apply quoting if needed */
+		if (c == '"' )
+                        *target++ = '\\';
+		if (c == '\\')
+			*target++ = c;
+		/* Copy the character */
+		*target++ = c;
+		source++;
+		remaining--;
+	}
+	/* Write the terminating NUL character. */
+	*target = '\0';
+	return target - to;
+}
 static VALUE
-pgconn_s_quote(self, obj)
+format_array_element(self, obj)
     VALUE self, obj;
 {
-    char* quoted;
-    int size;
-    VALUE result;
-
-    if (TYPE(obj) == T_STRING) {
-        /* length * 2 because every char could require escaping */
-        /* + 2 for the quotes, + 1 for the null terminator */
-        quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
-        size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
-        *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
-        result = rb_str_new(quoted, size + 2);
-        OBJ_INFECT(result, obj);
-        return result;
+    VALUE usr_form ; 
+    if (TYPE(obj) == T_STRING ) {
+        char * temp = ALLOCA_N(char, RSTRING(obj)->len * 2+3);
+        size_t q_len = escape_array_string( RSTRING(obj)->ptr, temp+1, RSTRING(obj)->len);
+        temp[0]='"';
+        temp[q_len+1]='"';
+        temp[q_len+2]='\0';
+        return rb_str_new(temp, q_len+2);
     }
     else {
-        return pgconn_s_format(self, obj);
+      VALUE temp = pgconn_s_format(self, obj);
+      usr_form = find_user_reg_formatter( CLASS_OF(obj));
+      if(usr_form != Qnil && rb_ary_entry(usr_form, 1) == Qtrue)
+        return format_array_element(self, temp);
+      else
+        return temp;
     }
 }
 
@@ -279,38 +376,71 @@ pgconn_s_quote(self, obj)
  *    PGconn.quote( obj ) { |obj| ... }
  *    PGconn.format( obj )
  *    PGconn.format( obj ) { |obj| ... }
- * 
- * If _obj_ is a Number, String, Array, +nil+, +true+, or +false+ then
+ *    conn.quote( obj )
+ *    conn.quote( obj ) { |obj| ... }
+ *    conn.format( obj )
+ *    conn.format( obj ) { |obj| ... }
+ *
+ * If _obj_ is a Number, String, Array, Time, Date, DateTime, PGrecord, 
+ * BigDecimal , +nil+, +true+, or +false+ then
  * #quote returns a String representation of that object safe for use in PostgreSQL.
  * 
- * If _obj_ is not one of the above classes and a block is supplied to #quote,
- * the block is invoked, passing along the object. The return value from the
- * block is returned as a string.
+ * It is possible to define custom format for Ruby class, using PGconn#reg_format
+ * class method. Custom formatters have higher priority than built-in.
  *
- * If _obj_ is not one of the recognized classes andno block is supplied,
+ * If _obj_ is not one of the above classes and no there is no custom formatter
+ * and a block is supplied to #quote, the block is invoked, passing along the object. 
+ * The return value from the block is returned as a string.
+ *
+ * If _obj_ is not one of the recognized classes and no block is supplied,
  * a PGError is raised.
+ *
+ * This method is available both as class and instance method.
  */
 static VALUE
-pgconn_quote(self, obj)
+pgconn_s_quote(self, obj)
     VALUE self, obj;
 {
     char* quoted;
     int size,error;
     VALUE result;
 
-    if (TYPE(obj) == T_STRING) {
+    if(CLASS_OF(obj) == rb_cPGbytea ) { // special case for bytea
+       VALUE buf=rb_str_buf_new2("'");
+       rb_str_buf_append(buf, pgconn_s_escape_bytea(self, obj));
+       rb_str_buf_cat2(buf, "'");
+       return buf;
+    }
+    
+    VALUE usr_form = find_user_reg_formatter( CLASS_OF(obj));
+    if (TYPE(obj) == T_STRING ) {
         /* length * 2 because every char could require escaping */
         /* + 2 for the quotes, + 1 for the null terminator */
         quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
-        size = PQescapeStringConn(get_pgconn(self),quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len, &error);
+#ifdef HAVE_PQESCAPESTRINGCONN
+        if( rb_cPGconn == CLASS_OF(self) ) {
+          /* to allow call as instance method */
+          size = PQescapeStringConn(get_pgconn(self),quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len, &error);
+        } else {
+          size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
+        }
+#else
+        size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
+#endif        
         *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
         result = rb_str_new(quoted, size + 2);
         OBJ_INFECT(result, obj);
         return result;
     }
-    else {
-        return pgconn_s_format(self, obj);
-    }
+    else 
+        if (TYPE(obj) == T_ARRAY || CLASS_OF(obj) == rb_cPGrecord || 
+            CLASS_OF(obj) == rb_cDate || CLASS_OF(obj) == rb_cDateTime || CLASS_OF(obj) == rb_cTime
+            || (Qnil != usr_form && rb_ary_entry(usr_form, 1) == Qtrue) )  {
+            return pgconn_s_quote(self, pgconn_s_format(self, obj));
+        }
+        else {
+            return pgconn_s_format(self, obj);
+        }
 }
 
 static VALUE
@@ -386,6 +516,9 @@ pgconn_s_quote_ident(self, string)
 }
 
 /*
+ * call-seq:
+ *    PGconn.escape( str )
+ *
  * Returns a SQL-safe version of the String _str_. Unlike #quote, does not wrap the String in '...'.
  */
 static VALUE
@@ -407,7 +540,10 @@ pgconn_s_escape(self, string)
 }
 
 /*
+ * call-seq:
+ *    conn.escape( str )
  * Returns a SQL-safe version of the String _str_. Unlike #quote, does not wrap the String in '...'.
+ * This is instance method, that also tries to use PQescapeStringConn.
  */
 static VALUE
 pgconn_escape(self, string)
@@ -421,7 +557,11 @@ pgconn_escape(self, string)
     Check_Type(string, T_STRING);
     
     escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
+#ifdef HAVE_PQESCAPESTRINGCONN    
     size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING(string)->ptr, RSTRING(string)->len, &error);
+#else
+    size = PQescapeString(escaped, RSTRING(string)->ptr, RSTRING(string)->len);
+#endif    
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
     return result;
@@ -430,6 +570,7 @@ pgconn_escape(self, string)
 /*
  * call-seq:
  *   PGconn.escape_bytea( obj )
+ *   connection.escape_bytea( obj )
  *
  * Escapes binary data for use within an SQL command with the type +bytea+.
  * 
@@ -441,6 +582,10 @@ pgconn_escape(self, string)
  * #escape_bytea performs this operation, escaping only the minimally required bytes.
  * 
  * See the PostgreSQL documentation on PQescapeBytea[http://www.postgresql.org/docs/current/interactive/libpq-exec.html#LIBPQ-EXEC-ESCAPE-BYTEA] for more information.
+ * 
+ * Connection instance method for versions of 8.1 and higher of libpq
+ * uses PQescapeByteaConn
+ *
  */
 static VALUE
 pgconn_s_escape_bytea(self, obj)
@@ -455,7 +600,15 @@ pgconn_s_escape_bytea(self, obj)
     from      = RSTRING(obj)->ptr;
     from_len  = RSTRING(obj)->len;
     
+#ifdef HAVE_PQESCAPESTRINGCONN   
+    if(CLASS_OF(self) == rb_cPGconn) {
+        to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
+    } else {
+        to = (char *)PQescapeBytea(from, from_len, &to_len);
+    }
+#else
     to = (char *)PQescapeBytea(from, from_len, &to_len);
+#endif    
     
     ret = rb_str_new(to, to_len - 1);
     OBJ_INFECT(ret, obj);
@@ -465,43 +618,6 @@ pgconn_s_escape_bytea(self, obj)
     return ret;
 }
 
-/*
- * call-seq:
- *   PGconn.escape_bytea( obj )
- *
- * Escapes binary data for use within an SQL command with the type +bytea+.
- * 
- * Certain byte values must be escaped (but all byte values may be escaped)
- * when used as part of a +bytea+ literal in an SQL statement. In general, to
- * escape a byte, it is converted into the three digit octal number equal to
- * the octet value, and preceded by two backslashes. The single quote (') and
- * backslash (\) characters have special alternative escape sequences.
- * #escape_bytea performs this operation, escaping only the minimally required bytes.
- * 
- * See the PostgreSQL documentation on PQescapeBytea[http://www.postgresql.org/docs/current/interactive/libpq-exec.html#LIBPQ-EXEC-ESCAPE-BYTEA] for more information.
- */
-static VALUE
-pgconn_escape_bytea(self, obj)
-    VALUE self;
-    VALUE obj;
-{
-    char *from, *to;
-    size_t from_len, to_len;
-    VALUE ret;
-    
-    Check_Type(obj, T_STRING);
-    from      = RSTRING(obj)->ptr;
-    from_len  = RSTRING(obj)->len;
-    
-    to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
-    
-    ret = rb_str_new(to, to_len - 1);
-    OBJ_INFECT(ret, obj);
-    
-    PQfreemem(to);
-    
-    return ret;
-}
 
 /*
  * call-seq:
@@ -631,49 +747,13 @@ get_pgresult(obj)
 PGresult *PQexecParams_compat(PGconn *conn, VALUE command, VALUE values);
 #endif
 
-#define TEXT_FORMAT 0
-#define BINARY_FORMAT 1
-
-void
-translate_to_pg(VALUE value, char const** result, int* length, int* format)
-{
-    switch (TYPE(value)) {
-    case T_NIL:
-      *result = NULL;
-      *length = 0;
-      *format = BINARY_FORMAT;
-      return;
-    case T_TRUE:
-      *result = "\1";
-      *length = 1;
-      *format = BINARY_FORMAT;
-      return;
-    case T_FALSE:
-      *result = "\0";
-      *length = 1;
-      *format = BINARY_FORMAT;
-      return;
-    case T_STRING:
-      *result = StringValuePtr(value);
-      *length = RSTRING(value)->len;
-      *format = BINARY_FORMAT;
-      return;
-    default:  {
-        VALUE formatted = pgconn_s_format(rb_cPGconn, value);
-        *result = StringValuePtr(formatted);
-        *length = RSTRING(formatted)->len;
-        *format = TEXT_FORMAT;
-      }
-    }
-}
-
 /*
  * call-seq:
  *    conn.exec(sql, *bind_values)
  *
  * Sends SQL query request specified by _sql_ to the PostgreSQL.
  * Returns a PGresult instance on success.
- * On failure, it raises a PGError exception.
+ * On failure, it raises a PGErr or exception.
  *
  * +bind_values+ represents values for the PostgreSQL bind parameters found in the +sql+.  PostgreSQL bind parameters are presented as $1, $1, $2, etc.
  */
@@ -685,7 +765,7 @@ pgconn_exec(argc, argv, obj)
 {
     PGconn *conn = get_pgconn(obj);
     PGresult *result = NULL;
-    VALUE command, params;
+    VALUE command, params, c_reslt;
     char *msg;
 
     rb_scan_args(argc, argv, "1*", &command, &params);
@@ -703,13 +783,27 @@ pgconn_exec(argc, argv, obj)
         char const** values = ALLOCA_N(char const*, len);
         int* lengths = ALLOCA_N(int, len);
         int* formats = ALLOCA_N(int, len);
+        VALUE formatted;
         for (i = 0; i < len; i++, ptr++) {
-            translate_to_pg(*ptr, values+i, lengths+i, formats+i);
+            if (*ptr == Qnil) {
+                values[i] = NULL;
+                lengths[i] = 0;
+                formats[i] = 0;
+            } else if (CLASS_OF(*ptr) == rb_cPGbytea) {
+                values[i] = StringValuePtr(*ptr);
+                lengths[i] = RSTRING(*ptr)->len;
+                formats[i] = 1;
+            } else {
+                formatted = pgconn_s_format(obj, *ptr);
+                values[i] = StringValuePtr(formatted);
+                lengths[i] = RSTRING(formatted)->len;
+                formats[i] = 0;
+            }
         }
         result = PQexecParams(conn, StringValuePtr(command), len, NULL, values, lengths, formats, 0);
 #else
         for (i = 0; i < len; i++) {
-            rb_ary_store(params, i, pgconn_s_quote(rb_cPGconn, rb_ary_entry(params, i)));
+            rb_ary_store(params, i, pgconn_s_quote(obj, rb_ary_entry(params, i)));
         }
         result = PQexecParams_compat(conn, command, params);
 #endif
@@ -725,12 +819,13 @@ pgconn_exec(argc, argv, obj)
     case PGRES_COPY_IN:
     case PGRES_EMPTY_QUERY:
     case PGRES_COMMAND_OK: {
-      VALUE pg_result = pgresult_new(result);
-      if (rb_block_given_p()) {
-          return rb_ensure(rb_yield, pg_result, pgresult_clear, pg_result);
+      c_reslt = pgresult_new(result);
+      rb_iv_set(c_reslt, "@connection", obj);
+      if(rb_block_given_p()) {
+        return rb_ensure(rb_yield, c_reslt, pgresult_clear, c_reslt);
       }
       else {
-          return pg_result;
+          return c_reslt;
       }
     }
 
@@ -1160,7 +1255,7 @@ pgconn_user(obj)
  * call-seq:
  *    conn.status()
  *
- * MISSING: documentation
+ * Returns status of connection : CONNECTION_OK or CONNECTION_BAD
  */
 static VALUE
 pgconn_status(obj)
@@ -1359,13 +1454,325 @@ has_numeric_scale(typmod)
 
 #define PARSE(klass, string) rb_funcall(klass, rb_intern("parse"), 1, rb_tainted_str_new2(string));
 
+/* checks if we have cached composite type definitions */
+static int
+loaded_composite_types(VALUE conn)
+{
+  return RTEST(rb_iv_get(conn, "@loaded_composite_types"));  
+}
+
+/* looks for composite type definition in cache */
 static VALUE
-fetch_pgresult(result, row, column)
+find_composite_type(conn, tip)
+  VALUE conn, tip;
+{
+  return rb_hash_aref(rb_iv_get(conn, "@cached_types"), tip);
+}
+
+/* looks for user  registered type translator */
+static VALUE
+find_user_reg_translator(VALUE conn, VALUE tip){
+  VALUE trs = rb_iv_get(conn, "@translators");
+  if (trs == Qnil) return Qnil;
+  return rb_hash_aref(trs, tip);
+}
+/* looks for user  registered type formatter */
+static VALUE
+find_user_reg_formatter( VALUE klass){
+  VALUE trs = rb_cv_get(rb_cPGconn, "@@formatters");
+  if (trs == Qnil) return Qnil;
+  return rb_hash_aref(trs, klass);
+}
+/* looks for user  registered array types */
+static VALUE
+find_user_reg_array_type(VALUE conn, VALUE oid_s){
+  VALUE trs = rb_iv_get(conn, "@array_types");
+  if (trs == Qnil) return Qnil;
+  return rb_hash_aref(trs, oid_s);
+}
+
+static char * raise_error(PGconn * conn, PGresult * result);
+static char * type_oid_find_query = "select '%s'::regtype::oid";
+static char * array_type_oid_find_query = "select oid, typelem from pg_type where oid = '%s'::regtype::oid";
+
+static VALUE 
+pgconn_find_type_oid (VALUE obj, VALUE name)
+{
+    PGconn * conn = get_pgconn(obj) ;
+    PGresult * result;
+    char * msg;
+    char * quoted = ALLOCA_N(char, RSTRING(name)->len * 2 + 2 + 1);
+    int size = PQescapeString(quoted, RSTRING(name)->ptr, RSTRING(name)->len);
+    char * query = ALLOCA_N(char, size+strlen(type_oid_find_query)+1);
+    sprintf(query, type_oid_find_query, quoted);
+    result=PQexec(conn, query);
+    if((msg = raise_error(conn, result)))
+    {
+      if(result) PQclear(result);
+      rb_raise(rb_ePGError, msg);
+      return Qnil;
+    }
+    VALUE oid_int = rb_cstr2inum(PQgetvalue(result, 0, 0), 10);
+    PQclear(result);
+    return oid_int;
+}
+/*
+ * call-seq:
+ *     conn.reg_array(array_type_name)
+ *
+ * Registers new array type. Base type is resolved from pg_type[http://www.postgresql.org/docs/current/interactive/catalog-pg-type.html] system table 
+ * 
+ *     conn.reg_array("point[]")
+ * */
+static VALUE
+pgconn_reg_array(self, array_type)
+    VALUE self, array_type;
+{
+    Check_Type(array_type, T_STRING);
+    PGconn * conn = get_pgconn(self) ;
+    PGresult * result;
+    char * msg;
+    char * quoted = ALLOCA_N(char, RSTRING(array_type)->len * 2 + 2 + 1);
+    int size = PQescapeString(quoted, RSTRING(array_type)->ptr, RSTRING(array_type)->len);
+    char * query = ALLOCA_N(char, size+strlen(array_type_oid_find_query)+1);
+    sprintf(query, array_type_oid_find_query, quoted);
+    result=PQexec(conn, query);
+    if((msg = raise_error(conn, result)))
+    {
+      if(result) PQclear(result);
+      rb_raise(rb_ePGError, msg);
+      return Qnil;
+    }
+    if(PQntuples(result) == 1){
+      VALUE oid_s = rb_cstr2inum(PQgetvalue(result, 0, 0), 10);
+      VALUE oid_base = rb_cstr2inum(PQgetvalue(result, 0, 1), 10);
+      VALUE translators = rb_iv_get(self, "@array_types");
+      VALUE rec = rb_ary_new2(2);
+      PQclear(result);
+      rb_ary_push(rec, oid_base);
+      rb_ary_push(rec, array_type);
+      rb_hash_aset(translators, oid_s, rec);
+      return oid_s;
+    }
+    rb_raise(rb_ePGError, "Type '%s' not found", RSTRING(array_type)->ptr);
+}
+/*
+ * call-seq:
+ *     conn.reg_translate(type_name, proc_block)
+ *
+ * Registers new translator proc. Translator proc must accept string representation 
+ * and return Ruby value:
+ * 
+ *     conn.reg_translate("inet", proc {|s| IPAddr.new(s) })
+ * */
+static VALUE
+pgconn_reg_translate(self, typename, proc_block)
+    VALUE self, typename, proc_block;
+{
+    Check_Type(typename, T_STRING);
+
+    VALUE oid_s = pgconn_find_type_oid(self, typename);
+    if(Qnil != oid_s) 
+    {
+      VALUE translators = rb_iv_get(self, "@translators");
+      VALUE rec = rb_ary_new2(2);
+      rb_ary_push(rec, typename);
+      rb_ary_push(rec, proc_block);
+      rb_hash_aset(translators, oid_s, rec);
+    }
+    return oid_s;
+}
+/*
+ * call-seq:
+ *     PGconn.reg_format(klass, proc_block, need_quotes)
+ *
+ * Registers new formatter proc. Formatter proc must return unquoted properly 
+ * formatted string representation of Ruby value:
+ * 
+ *     PGconn.reg_format(Time, proc {|t| t.strftime("%H:%M:%S") }, true)
+ * */
+static VALUE
+pgconn_reg_format(self, klass, proc_block, need_quotes)
+    VALUE self, klass, proc_block, need_quotes;
+{
+      Check_Type(klass, T_CLASS);
+      if(need_quotes != Qtrue && need_quotes != Qfalse) 
+        rb_raise(rb_eArgError, "need_quotes must be boolean! got ");
+      VALUE formatters = rb_cv_get(self, "@@formatters");
+    
+      VALUE rec = rb_ary_new2(2);
+      rb_ary_push(rec, proc_block);
+      rb_ary_push(rec, need_quotes);
+      rb_hash_aset(formatters, klass, rec);
+      return Qtrue;
+}
+
+
+static VALUE parse_composite(VALUE conn, char* string, VALUE type);
+
+/* parses single string value, converting to appropriate ruby type */    
+static VALUE 
+std_single_value(conn, string, typeoid, typmod)
+    VALUE conn;
+    char *string;
+    Oid typeoid;
+    int typmod;
+{
+    VALUE compType, oid_s, proc_ary;
+    switch (typeoid) {
+
+        case BOOLOID:
+          return *string == 't' ? Qtrue : Qfalse;
+    
+        case BYTEAOID:
+          return rb_funcall(rb_cPGbytea, rb_intern("new"), 1, pgconn_s_unescape_bytea(conn, rb_tainted_str_new2(string)));
+    
+        case NUMERICOID:
+          if (has_numeric_scale(typmod)) {
+              return rb_funcall(rb_cBigDecimal, rb_intern("new"), 1, rb_str_new2(string));
+          }
+          /* when scale == 0 return inum */
+    
+        case INT8OID:
+        case INT4OID:
+        case INT2OID:
+        case OIDOID:
+          return rb_cstr2inum(string, 10);
+    
+        case FLOAT8OID:
+        case FLOAT4OID:
+          return rb_float_new(rb_cstr_to_dbl(string, Qfalse));
+    
+        case DATEOID:
+          return PARSE(rb_cDate, string);
+        case TIMEOID:
+        case TIMETZOID:
+          return PARSE(rb_cTime, string);
+        case TIMESTAMPOID:
+        case TIMESTAMPTZOID:
+          return PARSE(rb_cDateTime, string);
+    
+        default:
+          oid_s = INT2NUM(typeoid);
+          proc_ary = find_user_reg_translator(conn, oid_s);
+          if(Qnil != proc_ary){
+              return rb_funcall(rb_ary_entry(proc_ary, 1), rb_intern("call"), 1, rb_str_new2(string));
+          }
+          if(loaded_composite_types(conn)) {
+              compType = find_composite_type(conn, oid_s);
+              if(Qnil != compType) 
+                  return parse_composite(conn, string, compType); 
+          }
+          return rb_tainted_str_new2(string);
+    }
+
+}
+
+#include "parse_array.c"
+static VALUE
+parse_string(conn, string, ftype, fmod)
+    VALUE  conn;
+    char * string;
+    Oid    ftype;
+    int    fmod;
+{
+    VALUE oid_s, rec;
+    Oid base_oid;
+    if(parse_arrays) {
+        switch (ftype) {
+            case ARRAYS_INT2OID:
+            case ARRAYS_INT4OID:
+            case ARRAYS_INT8OID:
+              return pg_parse_array(conn, string, INT8OID, -1);
+              
+            case ARRAYS_FLOAT4OID:
+            case ARRAYS_FLOAT8OID:
+              return pg_parse_array(conn, string, FLOAT8OID, -1);
+              
+            case ARRAYS_NUMERICOID:
+              return pg_parse_array(conn, string, NUMERICOID, -1);
+              
+            case ARRAYS_BOOLOID:
+              return pg_parse_array(conn, string, BOOLOID, -1);
+      
+            case ARRAYS_TEXTOID:
+            case ARRAYS_CHAROID:
+            case ARRAYS_VARCHAROID:
+            case ARRAYS_BPCHAROID:
+              return pg_parse_array(conn, string, TEXTOID, -1);
+            
+            case ARRAYS_DATEOID:
+              return pg_parse_array(conn, string, DATEOID, -1);
+
+            case ARRAYS_TIMEOID:
+            case ARRAYS_TIMETZOID:
+              return pg_parse_array(conn, string, TIMEOID, -1);
+            
+            case ARRAYS_TIMESTAMPOID:
+            case ARRAYS_TIMESTAMPTZOID:
+              return pg_parse_array(conn, string, TIMESTAMPOID, -1);
+         
+            default:
+              oid_s = INT2NUM(ftype);
+              rec = find_user_reg_array_type(conn, oid_s);
+              if(Qnil != rec) {
+                  base_oid = NUM2INT(rb_ary_entry(rec, 0));
+                  return pg_parse_array(conn, string, base_oid,-1);
+              }
+              return std_single_value(conn, string, ftype, fmod );
+        }
+    }
+    else
+        return std_single_value(conn, string, ftype, fmod );
+}
+/*
+ * call-seq:
+ *     conn.parse(type, string) -> Object
+ *
+ * If #translate_results= is set to +true+ parses string using translation 
+ * rules for given type, converts it to appropriate
+ * ruby class or +String+ if it can't be converted, with respect to all present
+ * built-in and custom user-defined translations and composite types.
+ *
+ * If type is +Fixnum+ it is treated as PostgreSQL type Oid, 
+ * if it is +String+, then query to database is performed to find Oid of given type,
+ *
+ *     conn.parse(23, "1234") # => Fixnum(1234)
+ *     conn.parse("float[]", "{1.2, 3.4}") # => Array [1.2, 3.4]
+ *
+ * Raises PGError if wrong type specified.
+ * Raises ArgumentError if second argument is not +String+.
+ * Other exceptions can be raised by parse procedures.
+ * 
+ * */
+
+VALUE pgconn_parse(self, typename, value)
+    VALUE self, typename, value;
+{
+   if( value == Qnil ) return Qnil;
+   
+   Check_Type(value, T_STRING);
+   if( 0 == translate_results )
+     return value;
+   
+   if( TYPE(typename) == T_STRING )
+     return parse_string(self, RSTRING(value)->ptr, NUM2INT(pgconn_find_type_oid(self, typename)), -1);
+   if( TYPE(typename) == T_FIXNUM )
+     return parse_string(self, RSTRING(value)->ptr, NUM2INT(typename), -1);
+   rb_raise(rb_eArgError, "expected either String or Fixnum as type id");
+}
+#include "parse_composite.c"
+
+static VALUE
+fetch_pgresult(conn, result, row, column)
+    VALUE    conn;
     PGresult *result;
     int row;
     int column;
 {
     char* string;
+    Oid ftype;
+    int fmod;
 
     if (PQgetisnull(result, row, column)) {
         return Qnil;
@@ -1377,40 +1784,10 @@ fetch_pgresult(result, row, column)
         return rb_tainted_str_new2(string);
     }
 
-    switch (PQftype(result, column)) {
-
-    case BOOLOID:
-      return *string == 't' ? Qtrue : Qfalse;
-
-    case BYTEAOID:
-      return pgconn_s_unescape_bytea(rb_cPGconn, rb_tainted_str_new2(string));
-
-    case NUMERICOID:
-      if (has_numeric_scale(PQfmod(result, column))) {
-          return rb_funcall(rb_cBigDecimal, rb_intern("new"), 1, rb_tainted_str_new2(string));
-      }
-      /* when scale == 0 return inum */
-
-    case INT8OID:
-    case INT4OID:
-    case INT2OID:
-      return rb_cstr2inum(string, 10);
-
-    case FLOAT8OID:
-    case FLOAT4OID:
-      return rb_float_new(rb_cstr_to_dbl(string, Qfalse));
-
-    case DATEOID:
-      return PARSE(rb_cDate, string);
-    case TIMEOID:
-    case TIMETZOID:
-    case TIMESTAMPOID:
-    case TIMESTAMPTZOID:
-      return PARSE(rb_cTime, string);
-
-    default:
-      return rb_tainted_str_new2(string);
-    }
+    ftype = PQftype(result, column);
+    fmod = PQfmod(result, column);
+    
+    return parse_string(conn, string, ftype, fmod);
 }
 
 
@@ -1421,6 +1798,10 @@ pgresult_new(ptr)
     return Data_Wrap_Struct(rb_cPGresult, 0, free_pgresult, ptr);
 }
 
+static VALUE
+get_result_conn(VALUE result){
+  return rb_iv_get(result, "@connection");
+}
 /*
  * call-seq:
  *    res.status()
@@ -1455,8 +1836,7 @@ fetch_pgrow(self, fields, row_num)
     VALUE row = rb_funcall(rb_cPGrow, rb_intern("new"), 1, fields);
     int field_num;
     for (field_num = 0; field_num < RARRAY(fields)->len; field_num++) {
-        /* don't use push, PGrow is sized with nils in #new */
-        rb_ary_store(row, field_num, fetch_pgresult(result, row_num, field_num));
+       rb_ary_store(row, field_num, fetch_pgresult(get_result_conn(self), result, row_num, field_num));
     }
     return row;
 }
@@ -1494,7 +1874,7 @@ pgconn_select_value(argc, argv, self)
     VALUE self;
 {
     VALUE result = pgconn_exec(argc, argv, self);
-    VALUE value = fetch_pgresult(get_pgresult(result), 0, 0);
+    VALUE value = fetch_pgresult(self, get_pgresult(result), 0, 0);
     pgresult_clear(result);
     return value;
 }
@@ -1520,7 +1900,7 @@ pgconn_select_values(argc, argv, self)
     int row_num, field_num;
     for (row_num = 0; row_num < ntuples; row_num++) {
       for (field_num = 0; field_num < nfields; field_num++) {
-        rb_ary_push(values, fetch_pgresult(result, row_num, field_num));
+        rb_ary_push(values, fetch_pgresult(self, result, row_num, field_num));
       }
     }
 
@@ -1581,7 +1961,7 @@ pgresult_aref(argc, argv, obj)
 
       val = rb_ary_new();
       for (j=0; j<nf; j++) {
-          VALUE value = fetch_pgresult(result, i, j);
+          VALUE value = fetch_pgresult(get_result_conn(obj), result, i, j);
           rb_ary_push(val, value);
       }
       return val;
@@ -1591,7 +1971,7 @@ pgresult_aref(argc, argv, obj)
       if( i >= nt ) return Qnil;
       j = NUM2INT(a2);
       if( j >= nf ) return Qnil;
-      return fetch_pgresult(result, i, j);
+      return fetch_pgresult(get_result_conn(obj), result, i, j);
 
     default:
       return Qnil;            /* not reached */
@@ -1786,7 +2166,7 @@ pgresult_getvalue(obj, tup_num, field_num)
         rb_raise(rb_eArgError,"invalid field number %d", j);
     }
 
-    return fetch_pgresult(result, i, j);
+    return fetch_pgresult(get_result_conn(obj), result, i, j);
 }
 
 
@@ -2495,6 +2875,8 @@ pgrow_values(self)
  *   row[name] -> value
  *
  * Access elements of this row by column position or name.
+ * 
+ * Raises an ArgumentError if the specified _name_ isn't one of the keys of row.
  */
 static VALUE
 pgrow_aref(argc, argv, self)
@@ -2507,6 +2889,7 @@ pgrow_aref(argc, argv, self)
         VALUE index = rb_funcall(keys, rb_intern("index"), 1, argv[0]);
         if (index == Qnil) {
             rb_raise(rb_ePGError, "%s: field not found", StringValuePtr(argv[0]));
+            return Qnil; /* to reduce compiler complains */
         }
         else {
             return rb_ary_entry(self, NUM2INT(index));
@@ -2604,13 +2987,432 @@ pgrow_to_hash(self)
     return result;
 }
 
-/* Large Object support */
+/*
+ * checks if result is not null and result status is valid.
+ * returns NULL if OK, message string, if errors.
+ * */
+static char *
+raise_error(PGconn * conn, PGresult * result)
+{
+  char *msg;
+  if(result == NULL){
+    return PQerrorMessage(conn);
+  }
+  switch (PQresultStatus(result)) {
+    case PGRES_TUPLES_OK:
+    case PGRES_COPY_OUT:
+    case PGRES_COPY_IN:
+    case PGRES_EMPTY_QUERY:
+    case PGRES_COMMAND_OK:      
+        return NULL;    
+    case PGRES_BAD_RESPONSE:
+    case PGRES_FATAL_ERROR:
+    case PGRES_NONFATAL_ERROR:
+        msg = RSTRING(rb_str_new2(PQresultErrorMessage(result)))->ptr;
+        break;
+    default:
+        msg = "internal error : unknown result status.";
+        break;
+  }
+  return msg;
+}
+#ifdef HAVE_PQEXECPARAMS
+/*
+ * call-seq: 
+ *     conn.prepare(stmt_name, query)
+ *
+ * Creates prepared named  SQL statement. Raises PGerror exception on failure.
+ * Prepared statements can be removed via SQL DEALLOCATE command.
+ */
+static VALUE 
+pgconn_prepare(self, name, stmt)
+  VALUE self, name, stmt;
+{
+  PGconn *conn;
+  PGresult * result;
+  char * msg;
+  conn = get_pgconn(self);
+  result = PQprepare(conn, StringValuePtr(name), StringValuePtr(stmt), 0, NULL);
+  if( (msg = raise_error(conn, result)) ) {
+    if(result) PQclear(result);
+    rb_raise(rb_ePGError, msg);
+    return Qnil;
+  }
+  PQclear(result);
+  return Qtrue;
+}
+/*
+ * call-seq:
+ *    conn.exec_prepared(statement_name, *bind_values)
+ *
+ * Execute prepared named statement specified by _statement_name_.
+ * Returns a PGresult instance on success.
+ * On failure, it raises a PGError exception.
+ *
+ * +bind_values+ represents values for the PostgreSQL bind parameters found in the prepared statement.  
+ * PostgreSQL bind parameters are presented as $1, $1, $2, etc.
+ */
+static VALUE
+pgconn_exec_prepared(argc, argv, obj)
+    int argc;
+    VALUE *argv;
+    VALUE obj;
+{
+    PGconn *conn = get_pgconn(obj);
+    PGresult *result = NULL;
+    VALUE command, params, c_reslt;
+    char * msg;
 
+    rb_scan_args(argc, argv, "1*", &command, &params);
+
+    Check_Type(command, T_STRING);
+
+    if (RARRAY(params)->len <= 0) {
+        result = PQexecPrepared(conn, StringValuePtr(command), 0, NULL, NULL, NULL, 0);
+    }
+    else {
+        int len = RARRAY(params)->len;
+        int i;
+        VALUE* ptr = RARRAY(params)->ptr;
+        const char ** values = ALLOCA_N(const char *, len);
+        int  * p_lengths = ALLOCA_N( int , len);
+        int  * p_formats   = ALLOCA_N( int , len);
+        VALUE formatted;
+        for (i = 0; i < len; i++, ptr++) {
+            if (*ptr == Qnil) {
+                values[i] = NULL;
+                p_lengths[i] = 0;
+                p_formats[i] = 0;
+            } else if (CLASS_OF(*ptr) == rb_cPGbytea) {
+                values[i] = StringValuePtr(*ptr);
+                p_lengths[i] = RSTRING(*ptr)->len;
+                p_formats[i] = 1;
+            } else {
+                formatted = pgconn_s_format(obj, *ptr);
+                values[i] = StringValuePtr(formatted);
+                p_lengths[i] = RSTRING(formatted)->len;
+                p_formats[i] = 0;
+            }
+        }
+        result = PQexecPrepared(conn, StringValuePtr(command), len,  values, p_lengths, p_formats, 0);
+   }
+
+    if((msg = raise_error(conn, result))) {
+      if(result) PQclear(result);
+      rb_raise(rb_ePGError, msg);
+      return Qnil;
+    }
+    c_reslt =pgresult_new(result );
+    rb_iv_set(c_reslt, "@connection", obj);
+    return c_reslt;
+}
+
+#endif
+/* --------------------------*/
+/*  COMPOSITE TYPES SUPPORT  */
+/* --------------------------*/
+
+/*
+ * call-seq:
+ *     PGfield.new(name, type_oid, type_mod, type_name)
+ *
+ */
+static VALUE
+pg_attribute_init( self,  attname,  typeoid,  typmod,  typname)
+   VALUE self, attname, typeoid, typmod, typname;
+{
+  rb_iv_set(self, "@name", attname);
+  rb_iv_set(self, "@type_oid", typeoid);
+  rb_iv_set(self, "@type_mod", typmod);
+  rb_iv_set(self, "@type_name", typname);
+  return self;
+}
+
+static char * attribute_query = "select attname, atttypid::int, atttypmod, format_type(atttypid, atttypmod) as type_name "
+    "from pg_attribute where attrelid = "
+    "(select typrelid from pg_type where oid = %d ) and not attisdropped and attnum > 0 "
+    "order by attnum";
+
+/*
+ * call-seq: 
+ *     PGrowtype.new(conn, type_oid, type_name)
+ *
+ * Creates new instance of PGrowtype, loading data from database.
+ * */    
+static VALUE 
+pg_composite_init(self, obj, tip, type_name)
+  VALUE self, obj, tip, type_name;
+{
+   VALUE attrs, attnames;
+   int i;
+   PGresult * result;
+   PGconn * conn;
+   char * msg;
+   conn = get_pgconn(obj);
+   char * attribute_patched_query = ALLOCA_N(char, strlen(attribute_query)+20);
+   sprintf(attribute_patched_query, attribute_query, NUM2INT(tip));
+   result = PQexec(conn, attribute_patched_query);
+   if( (msg = raise_error(conn, result)) )
+   {
+      if(result) PQclear(result);
+      rb_raise(rb_ePGError, msg);
+      return self;
+   }
+   int ntuples = PQntuples(result);
+   attrs = rb_ary_new2(ntuples);
+   attnames = rb_ary_new2(ntuples);
+   for(i = 0;i< ntuples; i++) 
+   {  //attname,  typeoid,  typmod,  typname)
+      VALUE param2[4] = { 
+          rb_str_new2(PQgetvalue(result, i, 0)),     // attname
+          rb_cstr2inum(PQgetvalue(result,i, 1), 10), // typeoid
+          rb_cstr2inum(PQgetvalue(result,i, 2), 10), // typmod
+          rb_str_new2(PQgetvalue(result, i, 3)) };   // type_name
+      rb_ary_push(attrs, rb_class_new_instance(4, param2, rb_cPGfield) );
+      rb_ary_push(attnames, param2[0]);
+   }
+   PQclear(result);
+   rb_iv_set(self, "@attributes", attrs);
+   rb_iv_set(self, "@attnames", attnames);
+   rb_iv_set(self, "@name", type_name);
+   rb_iv_set(self, "@oid", tip);
+   return self;
+}
+
+/*
+ * call-seq:
+ *     composite_type.index(field_name)
+ * 
+ * Returns index of given field in record.
+ */
+static VALUE
+pg_composite_index(self, obj)
+  VALUE self, obj;
+{
+  return rb_funcall(rb_iv_get(self, "@attnames"), rb_intern("index"),1, obj);
+}
+
+
+/*
+ * call-seq:
+ *     conn.load_composite_types
+ *
+ * Creates cache of PGrowtype objects - definitions of composite PostgreSQL types.
+ * 
+ * Cached types are retrieved from @cached_types attribute by OID.
+ */
+static VALUE 
+pgconn_load_composite_types(self) 
+    VALUE self;
+{
+  VALUE cached_types = rb_hash_new();
+  int i;
+  PGresult * result;
+  PGconn * conn = get_pgconn(self);
+  char * msg;
+
+  rb_iv_set(self, "@loaded_composite_types", Qfalse);
+  rb_iv_set(self, "@cached_types", cached_types);
+  result = PQexec(conn, "select t.oid, format_type(t.oid, typtypmod)   from pg_type t where typtype = 'c'");
+  if( (msg = raise_error(conn, result)) ) {
+     if (result) PQclear(result);
+     rb_raise(rb_ePGError, msg);
+     return Qnil;
+  }
+  int ntuples = PQntuples(result);
+  VALUE ** prepared_params = ALLOCA_N(VALUE *, ntuples+1);
+  for(i = 0; i < ntuples ; i++) {
+      VALUE * params2 = ALLOCA_N(VALUE, 4);
+      params2[0] = self;  // conn
+      params2[1] = rb_cstr2inum(PQgetvalue(result, i, 0), 10); // type OID
+      params2[2] = rb_str_new2(PQgetvalue(result, i, 1)); // type name
+      prepared_params[i] = params2;
+  }
+  PQclear(result);
+  for(i = 0; i < ntuples; i++) {
+      VALUE c_type = rb_class_new_instance(3, prepared_params[i], rb_cPGrowtype);
+      rb_hash_aset(cached_types, prepared_params[i][1], c_type );
+  }
+  rb_iv_set(self, "@loaded_composite_types", Qtrue);
+  rb_obj_freeze(cached_types);
+  return Qnil;
+}
+
+/* 
+ * call-seq:
+ *     PGrecord.new( record_type, field_values)
+ *
+ */
+static VALUE 
+pg_composite_value_init(self, c_type, values)
+    VALUE self, c_type, values;
+{
+   rb_iv_set(self, "@record_type", c_type);
+   rb_iv_set(self, "@values", values);
+   return self;
+}
+/* 
+ * call-seq:
+ *     conn.compose(type_name, values) -> PGrecord
+ *
+ * Returns instance of PGrecord, for given PostgreSQL typename,
+ * and initializes field from given values. Values parameter can be 
+ * anything, that support [] method.
+ *
+ * Raises PGError if there is no such type in DB or type is not in cache.
+ *
+ *     item = conn.compose("inventory_item2", { :name => "fuzzy dice", :suppliers => [42, 43], :prices => [1.99, 1.75]} )
+ */
+static VALUE
+pgconn_compose(self, typename, values)
+    VALUE self, typename, values;
+{
+  Check_Type(typename, T_STRING);
+  VALUE oid_s =  pgconn_find_type_oid(self, typename);
+  if(Qnil == oid_s)
+    rb_raise(rb_ePGError, "Type '%s' not found database! ", StringValuePtr(typename));
+  VALUE comp_type = find_composite_type( self, oid_s);
+  if(Qnil == comp_type)
+    rb_raise(rb_ePGError, "Type '%s' not found in cache! ", StringValuePtr(typename));
+  VALUE attnames = rb_iv_get(comp_type, "@attnames");
+  int n = RARRAY(attnames)->len;
+  int i;
+  VALUE new_values = rb_ary_new2(n);
+  for(i = 0; i < n ; i++) {
+     VALUE val = rb_funcall(values, rb_intern("[]"), 1, rb_ary_entry(attnames, i)); 
+     if(Qnil == val) // trying to resolve as symbol
+        val =  rb_funcall(values, rb_intern("[]"), 1, rb_str_intern(rb_ary_entry(attnames, i))); 
+     rb_ary_push(new_values, val);
+  }
+  VALUE params[2] =  {comp_type, new_values};
+  return rb_class_new_instance(2, params, rb_cPGrecord);
+}    
+/*
+ * call-seq:
+ *     record.names()
+ *
+ * Returns names of attributes.
+ * */
+static VALUE 
+pg_composite_value_names(self)
+  VALUE self;
+{
+   return rb_iv_get(rb_iv_get(self, "@record_type"), "@attnames");
+}
+
+/*
+ * call-seq:
+ *     record.index(attname)
+ *
+ * returns index of given attribute name.
+ * */
+static long
+pgcv_get_index(obj, name)
+    VALUE obj, name;
+{
+  return NUM2INT(rb_funcall(rb_iv_get(obj, "@record_type"), rb_intern("index"), 1, name));
+}
+
+/*
+ * call-seq:
+ *     record[name] -> attribute value
+ *
+ * Accessor method - returns value of record field, eg.
+ *     name['first'] # => 'John'
+ * */
+static VALUE 
+pg_composite_value_aref(self, name)
+    VALUE self, name;
+{
+  return rb_ary_entry(rb_iv_get(self, "@values"), pgcv_get_index(self, name) );
+}
+
+/*
+ * call-seq:
+ *     record[name]= new_value
+ *
+ * Mutator method - sets record field to new value. 
+ *
+ *     name['first'] = 'Jack'
+ * */
+static VALUE 
+pg_composite_value_aset(self, name, value)
+  VALUE self, name, value;
+{
+  return rb_funcall(rb_iv_get(self, "@values"), rb_intern("[]="), 2, INT2NUM(pgcv_get_index(self, name)), value);
+}
+
+/*
+ * call-seq:
+ *    record1 == record2
+ *
+ * Compares for equality two composite records.
+ * Records are considered equal if they have the same record type and
+ * all their fields are equal.
+ * */
+static VALUE
+pg_composite_value_equal(self, obj)
+  VALUE self, obj;
+{
+  if(! rb_equal(rb_iv_get(self, "@record_type"), rb_iv_get(obj, "@record_type")) )
+    return Qfalse;
+  if( rb_equal(rb_iv_get(self, "@values"), rb_iv_get(obj, "@values")) )
+    return Qtrue;
+  else
+    return Qfalse;
+}
+
+/*
+ * overloaded to allow more record-like access to components of composite record,
+ * if method begins with '_' (underscore) and there is such field, accessor and
+ * mutator methods are emulated:
+ *
+ *    # having composite type EMAIL_ADDRESS(account VARCHAR(200), network VARCHAR(200))
+ *    # accessor methods
+ *    email._account # => 'username'
+ *    # mutator
+ *    email._network  = 'example.com'
+ * */
+static VALUE
+pg_composite_value_method_missing(argc, argv, self)
+    int argc;
+    VALUE *argv;
+    VALUE self;
+{
+   VALUE idx;
+   char * method_name = rb_id2name(rb_to_id(argv[0])) ;
+   VALUE mname = rb_str_new2(method_name);
+   if( *method_name == '_') {
+      ++method_name;
+      if (argc == 1) {
+         mname = rb_str_new2(method_name);
+         idx = pg_composite_index(rb_iv_get(self, "@record_type"), mname);
+         if (idx != Qnil) {
+           return pg_composite_value_aref(self, mname);
+         }
+      }
+      if (argc == 2) {
+         int len = strlen(method_name);
+         if( method_name[len-1] == '=' ) {
+            mname = rb_str_new(method_name, len-1);
+            idx = pg_composite_index(rb_iv_get(self, "@record_type"), mname );
+            if (idx != Qnil) {
+               return pg_composite_value_aset(self, mname, argv[1]);
+            }
+         }
+      }
+   }
+   rb_raise(rb_eNoMethodError, method_name);
+   return Qnil;
+}
 /********************************************************************
  * 
  * Document-class: PGconn
  *
- * The class to access PostgreSQL database.
+ * The class to access PostgreSQL database, based on libpq[http://www.postgresql.org/docs/current/interactive/libpq.html]
+ * interface, provides convenient OO methods to query database and means for
+ * transparent translation of query results (including PostgreSQL arrays and composite types) to 
+ * appropriate ruby class values and vice versa.
  *
  * For example, to send query to the database on the localhost:
  *    require 'pg'
@@ -2618,6 +3420,88 @@ pgrow_to_hash(self)
  *    res  = conn.exec('select * from a')
  *
  * See the PGresult class for information on working with the results of a query.
+ *
+ * ------------------------
+ * ==Functions overview
+ *
+ * 1. Connection Control functions:
+ *    #new (aliases: #connect , #open, #setdb, #setdblogin)
+ *    #close (alias: #finish )
+ *    #reset
+ *    
+ *    #trace
+ *    #untrace
+ *    #set_client_encoding
+ *
+ * 2. Connection Info Methods:  
+ *    #db
+ *    #host
+ *    #user
+ *    #options
+ *    #port
+ *    #tty
+ *    #protocol_version  
+ *    #server_version
+ *    
+ *    #status
+ *    #error
+ *    #transaction_status
+ *    #client_encoding
+ *
+ * 3. Query functions:
+ *    #exec
+ *    #query
+ *    #lastval
+ *    
+ *    #async_exec
+ *    #async_query
+ *    
+ *    #get_notify
+ *    #on_notice
+ *    
+ *    #insert_table
+ *    #putline
+ *    #getline
+ *    #endcopy
+ *    
+ *    classes: PGresult, PGrow
+ *    
+ * 4. Prepared statements:
+ *    #prepare
+ *    #exec_prepared
+ *
+ * 5. Value translation and formatting:
+ *    * Generic:
+ *      #escape, #quote (alias: #format), #parse 
+ *      
+ *    * BYTEA support
+ *      #escape_bytea, #unescape_bytea, 
+ *
+ *      class PGbytea
+ *      
+ *    * Value translation:
+ *      #translate_results=
+ *      #parse_arrays=
+ * 
+ *    * Custom value translation and formatting:
+ *      #reg_translate
+ *      #reg_array
+ *      #reg_format
+ *
+ *    * Composite Types support:     
+ *      #load_composite_types
+ *      #get_composite_type
+ *      #compose
+ *      
+ *      classes: PGrowtype, PGfield, PGrecord
+ *
+ * 6. Large Object support:
+ *    #lo_import
+ *    #lo_create
+ *    #lo_open 
+ *    #lo_export
+ *    #lo_unlink 
+ *    class PGlarge
  */
 
 
@@ -2649,6 +3533,48 @@ pgrow_to_hash(self)
  * PGconn#lo_import, PGconn#lo_create, and PGconn#lo_open.
  */
 
+/********************************************************************
+ * 
+ * Document-class: PGfield
+ *
+ * The class to store information about composite type field
+ * Instances of this class are created during creation of PGrowtype instance.
+ */
+
+/********************************************************************
+ * 
+ * Document-class: PGrowtype
+ *
+ * The class to store information about composite type structure.
+ * A composite type describes the structure of a row or record; 
+ * it is in essence just a list of field names and their data types. 
+ * PostgreSQL allows values of composite types to be used in many of 
+ * the same ways that simple types can be used. For example, a column 
+ * of a table can be declared to be of a composite type.
+ * See [http://www.postgresql.org/docs/current/interactive/rowtypes.html] for details
+ * 
+ * Instances of this class are created during PGconn.load_composite_types
+ */
+
+/********************************************************************
+ * 
+ * Document-class: PGrecord
+ *
+ * The class to store value of PostgreSQL composite type (record types).
+ * Instances of this class are created automatically when translating results
+ * and there is type definition (PGrowtype) in cache (loaded during PGconn.load_composite_types),
+ * or via PGconn.compose method.
+ */
+
+/********************************************************************
+ *
+ * Document-class: PGbytea
+ *
+ * XXX: The class to store binary value of BYTEA field. Essentially, PGbytea is method-less ancestor
+ * of String, but introducing special class is useful to avoid escaping when 
+ * using query with parameters.
+ *
+ */
 void
 Init_pg()
 {
@@ -2678,6 +3604,7 @@ Init_pg()
     rb_define_singleton_alias(rb_cPGconn, "open", "connect");
     rb_define_singleton_alias(rb_cPGconn, "setdb", "connect");
     rb_define_singleton_alias(rb_cPGconn, "setdblogin", "connect");
+    rb_define_singleton_alias(rb_cPGconn, "open", "connect");
     rb_define_singleton_method(rb_cPGconn, "escape", pgconn_s_escape, 1);
     rb_define_singleton_method(rb_cPGconn, "quote", pgconn_s_quote, 1);
     rb_define_singleton_alias(rb_cPGconn, "format", "quote");
@@ -2685,6 +3612,9 @@ Init_pg()
     rb_define_singleton_method(rb_cPGconn, "unescape_bytea", pgconn_s_unescape_bytea, 1);
     rb_define_singleton_method(rb_cPGconn, "translate_results=", pgconn_s_translate_results_set, 1);
     rb_define_singleton_method(rb_cPGconn, "quote_ident", pgconn_s_quote_ident, 1);
+    rb_define_singleton_method(rb_cPGconn, "parse_arrays=", pgconn_s_parse_arrays_set, 1);
+    rb_define_singleton_method(rb_cPGconn, "reg_format", pgconn_reg_format, 3);
+    rb_define_class_variable(rb_cPGconn, "@@formatters", rb_hash_new());
 
     rb_define_const(rb_cPGconn, "CONNECTION_OK", INT2FIX(CONNECTION_OK));
     rb_define_const(rb_cPGconn, "CONNECTION_BAD", INT2FIX(CONNECTION_BAD));
@@ -2720,12 +3650,24 @@ Init_pg()
     rb_define_method(rb_cPGconn, "protocol_version", pgconn_protocol_version, 0);
     rb_define_method(rb_cPGconn, "server_version", pgconn_server_version, 0);
     rb_define_method(rb_cPGconn, "escape", pgconn_escape, 1);
-    rb_define_method(rb_cPGconn, "escape_bytea", pgconn_escape_bytea, 1);
+    rb_define_method(rb_cPGconn, "escape_bytea", pgconn_s_escape_bytea, 1);
     rb_define_method(rb_cPGconn, "unescape_bytea", pgconn_s_unescape_bytea, 1);
-    rb_define_method(rb_cPGconn, "quote", pgconn_quote, 1);
+    rb_define_method(rb_cPGconn, "quote", pgconn_s_quote, 1);
     rb_define_method(rb_cPGconn, "quote_ident", pgconn_s_quote_ident, 1);
     rb_define_alias(rb_cPGconn, "format", "quote");
 
+    rb_define_method(rb_cPGconn, "load_composite_types", pgconn_load_composite_types, 0);
+    rb_define_method(rb_cPGconn, "get_composite_type", find_composite_type, 1);
+    rb_define_method(rb_cPGconn, "reg_translate", pgconn_reg_translate, 2);
+    rb_define_method(rb_cPGconn, "reg_array", pgconn_reg_array, 1);
+    rb_define_method(rb_cPGconn, "compose", pgconn_compose, 2);
+    rb_define_method(rb_cPGconn, "parse", pgconn_parse, 2);
+#ifdef HAVE_PQEXECPARAMS
+    rb_define_method(rb_cPGconn, "prepare", pgconn_prepare, 2);
+    rb_define_method(rb_cPGconn, "exec_prepared", pgconn_exec_prepared, -1);
+ 
+#endif
+    rb_define_attr(rb_cPGconn, "cached_types", 1, 0);
     /* following line is for rdoc */
     /* rb_define_method(rb_cPGconn, "lastval", pgconn_lastval, 0); */
 
@@ -2810,4 +3752,36 @@ Init_pg()
     rb_define_method(rb_cPGrow, "each_key", pgrow_each_key, 0);
     rb_define_method(rb_cPGrow, "each_value", pgrow_each_value, 0);
     rb_define_method(rb_cPGrow, "to_hash", pgrow_to_hash, 0); 
+
+    rb_cPGfield  = rb_define_class("PGfield", rb_cObject);
+    rb_define_method(rb_cPGfield, "initialize", pg_attribute_init, 4);
+    rb_define_attr(rb_cPGfield, "name", 1, 0);
+    /* type OID */
+    rb_define_attr(rb_cPGfield, "type_oid", 1, 0);
+    /* type modifier */
+    rb_define_attr(rb_cPGfield, "type_mod", 1, 0);
+    /* formatted type string*/
+    rb_define_attr(rb_cPGfield, "type_name", 1, 0);
+
+    rb_cPGrowtype  = rb_define_class("PGrowtype", rb_cObject);
+    rb_define_method(rb_cPGrowtype, "initialize", pg_composite_init, 3);
+    rb_define_method(rb_cPGrowtype, "index", pg_composite_index, 1);
+    /* array of field definitions (PGfield) */
+    rb_define_attr(rb_cPGrowtype, "attributes", 1, 0);
+    /* composite type OID */
+    rb_define_attr(rb_cPGrowtype, "oid", 1, 0);
+    rb_define_attr(rb_cPGrowtype, "name", 1, 0);
+
+    rb_cPGrecord  = rb_define_class("PGrecord", rb_cObject);
+    rb_define_method(rb_cPGrecord, "initialize", pg_composite_value_init, 2);
+    rb_define_method(rb_cPGrecord, "names", pg_composite_value_names, 0);
+    rb_define_method(rb_cPGrecord, "[]", pg_composite_value_aref, 1);
+    rb_define_method(rb_cPGrecord, "==", pg_composite_value_equal, 1);
+    rb_define_method(rb_cPGrecord, "[]=", pg_composite_value_aset, 2);
+    rb_define_method(rb_cPGrecord, "method_missing", pg_composite_value_method_missing, -1);
+    /* record type (PGrowtype) */
+    rb_define_attr(rb_cPGrecord, "record_type", 1, 0);
+
+    rb_cPGbytea  = rb_define_class("PGbytea", rb_cString);
+
 }
