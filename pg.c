@@ -2436,7 +2436,7 @@ pgconn_loexport(obj, lo_oid,filename)
         rb_raise(rb_ePGError, "invalid large object oid %d",oid);
     }
 
-    if (!lo_export(conn, oid, StringValuePtr(filename))) {
+    if (lo_export(conn, oid, StringValuePtr(filename)) < 0) {
         rb_raise(rb_ePGError, PQerrorMessage(conn));
     }
     return Qnil;
@@ -2808,7 +2808,7 @@ pglarge_export(obj, filename)
 
     Check_Type(filename, T_STRING);
 
-    if (!lo_export(pglarge->pgconn, pglarge->lo_oid, StringValuePtr(filename))){
+    if (lo_export(pglarge->pgconn, pglarge->lo_oid, StringValuePtr(filename)) < 0){
         rb_raise(rb_ePGError, PQerrorMessage(pglarge->pgconn));
     }
 
@@ -2827,7 +2827,7 @@ pglarge_unlink(obj)
 {
     PGlarge *pglarge = get_pglarge(obj);
 
-    if (!lo_unlink(pglarge->pgconn,pglarge->lo_oid)) {
+    if (lo_unlink(pglarge->pgconn,pglarge->lo_oid) < 0) {
         rb_raise(rb_ePGError, PQerrorMessage(pglarge->pgconn));
     }
     DATA_PTR(obj) = 0;
