@@ -12,31 +12,7 @@
   $Date$
 ************************************************/
 
-#include "ruby.h"
-#include "rubyio.h"
-#include "st.h"
-
-/* grep '^#define' $(pg_config --includedir)/server/catalog/pg_type.h | grep OID */
-#include "type-oids.h"
-#include <libpq-fe.h>
-#include <libpq/libpq-fs.h>              /* large-object interface */
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/types.h>
-
-#ifndef HAVE_PG_ENCODING_TO_CHAR
-#define pg_encoding_to_char(x) "SQL_ASCII"
-#else
-extern char* pg_encoding_to_char(int);
-#endif
-
-#ifndef HAVE_PQFREEMEM
-#define PQfreemem(ptr) free(ptr)
-#endif
-
-#ifndef StringValuePtr
-#define StringValuePtr(x) STR2CSTR(x)
-#endif
+#include "pg.h"
 
 #define AssignCheckedStringValue(cstring, rstring) do { \
     if (!NIL_P(temp = rstring)) { \
@@ -44,10 +20,6 @@ extern char* pg_encoding_to_char(int);
         cstring = StringValuePtr(temp); \
     } \
 } while (0)
-
-#if RUBY_VERSION_CODE < 180
-#define rb_check_string_type(x) rb_check_convert_type(x, T_STRING, "String", "to_str")
-#endif
 
 #define rb_check_hash_type(x) rb_check_convert_type(x, T_HASH, "Hash", "to_hash")
 
@@ -88,14 +60,6 @@ static VALUE pgresult_new _((PGresult*));
 
 static int translate_results = 1;
 static int parse_arrays = 1;
-
-/* Large Object support */
-typedef struct pglarge_object
-{
-    PGconn *pgconn;
-    Oid lo_oid;
-    int lo_fd;
-} PGlarge;
 
 static VALUE pglarge_new _((PGconn*, Oid, int));
 /* Large Object support */
@@ -417,16 +381,12 @@ pgconn_s_quote(self, obj)
         /* length * 2 because every char could require escaping */
         /* + 2 for the quotes, + 1 for the null terminator */
         quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
-#ifdef HAVE_PQESCAPESTRINGCONN
         if( rb_cPGconn == CLASS_OF(self) ) {
           /* to allow call as instance method */
           size = PQescapeStringConn(get_pgconn(self),quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len, &error);
         } else {
           size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
         }
-#else
-        size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
-#endif        
         *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
         result = rb_str_new(quoted, size + 2);
         OBJ_INFECT(result, obj);
@@ -557,11 +517,7 @@ pgconn_escape(self, string)
     Check_Type(string, T_STRING);
     
     escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
-#ifdef HAVE_PQESCAPESTRINGCONN    
     size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING(string)->ptr, RSTRING(string)->len, &error);
-#else
-    size = PQescapeString(escaped, RSTRING(string)->ptr, RSTRING(string)->len);
-#endif    
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
     return result;
@@ -600,15 +556,11 @@ pgconn_s_escape_bytea(self, obj)
     from      = RSTRING(obj)->ptr;
     from_len  = RSTRING(obj)->len;
     
-#ifdef HAVE_PQESCAPESTRINGCONN   
     if(CLASS_OF(self) == rb_cPGconn) {
-        to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
+        to = (char *)PQescapeByteaConn(get_pgconn(self),(unsigned char*)from, from_len, &to_len);
     } else {
-        to = (char *)PQescapeBytea(from, from_len, &to_len);
+        to = (char *)PQescapeBytea( (unsigned char*)from, from_len, &to_len);
     }
-#else
-    to = (char *)PQescapeBytea(from, from_len, &to_len);
-#endif    
     
     ret = rb_str_new(to, to_len - 1);
     OBJ_INFECT(ret, obj);
@@ -640,7 +592,7 @@ pgconn_s_unescape_bytea(self, obj)
     Check_Type(obj, T_STRING);
     from = StringValuePtr(obj);
 
-    to = (char *) PQunescapeBytea(from, &to_len);
+    to = (char *) PQunescapeBytea( (unsigned char*) from, &to_len);
 
     ret = rb_str_new(to, to_len);
     OBJ_INFECT(ret, obj);
@@ -742,10 +694,6 @@ get_pgresult(obj)
     if (result == NULL) rb_raise(rb_ePGError, "query not performed");
     return result;
 }
-
-#ifndef HAVE_PQEXECPARAMS
-PGresult *PQexecParams_compat(PGconn *conn, VALUE command, VALUE values);
-#endif
 
 /*
  * call-seq:
@@ -1335,8 +1283,6 @@ pgconn_transaction_status(obj)
     return INT2NUM(PQtransactionStatus(get_pgconn(obj)));
 }
 
-#ifdef HAVE_PQSETCLIENTENCODING
-
 /*
  * call-seq:
  *  conn.protocol_version -> Integer
@@ -1432,7 +1378,6 @@ pgconn_set_client_encoding(obj, str)
     }
     return Qnil;
 }
-#endif
 
 static void
 free_pgresult(ptr)
@@ -1746,7 +1691,7 @@ parse_string(conn, string, ftype, fmod)
  * 
  * */
 
-VALUE pgconn_parse(self, typename, value)
+static VALUE pgconn_parse(self, typename, value)
     VALUE self, typename, value;
 {
    if( value == Qnil ) return Qnil;
@@ -3671,10 +3616,8 @@ Init_pg()
     /* following line is for rdoc */
     /* rb_define_method(rb_cPGconn, "lastval", pgconn_lastval, 0); */
 
-#ifdef HAVE_PQSETCLIENTENCODING
     rb_define_method(rb_cPGconn, "client_encoding", pgconn_client_encoding, 0);
     rb_define_method(rb_cPGconn, "set_client_encoding", pgconn_set_client_encoding, 1);
-#endif
 
     /* Large Object support */
     rb_define_method(rb_cPGconn, "lo_import", pgconn_loimport, 1);

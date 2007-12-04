@@ -20,14 +20,21 @@ end
 dir_config('pgsql', config_value('include'), config_value('lib'))
 
 required_libraries = []
-desired_functions = %w(PQsetClientEncoding pg_encoding_to_char PQfreemem PQescapeStringConn)
-compat_functions = %w(PQescapeString PQexecParams)
+desired_functions = %w(
+	PQsetClientEncoding 
+	pg_encoding_to_char 
+	PQfreemem 
+	PQescapeStringConn
+	PQprepare
+	PQescapeString
+	PQexecParams
+)
 
 if have_build_env
   required_libraries.each(&method(:have_library))
   desired_functions.each(&method(:have_func))
-  $objs = compat_functions.all?(&method(:have_func)) ? ['pg.o'] : ['pg.o', 'libpq-compat.o']
-  $CFLAGS << ' -Wall '
+  $objs = ['pg.o', 'compat.o']
+  $CFLAGS << ' -Wall -Wmissing-prototypes'
   create_makefile("pg")
 else
   puts 'Could not find PostgreSQL build environment (libraries & headers): Makefile not created'

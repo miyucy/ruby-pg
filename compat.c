@@ -1,4 +1,48 @@
-#include <stdlib.h>
+#include "compat.h"
+
+#ifndef HAVE_PQSETCLIENTENCODING
+int
+PQsetClientEncoding(PGconn *conn, const char *encoding)
+{
+	char        qbuf[128];
+	static const char query[] = "set client_encoding to '%s'";
+	PGresult   *res;
+	int         status;
+
+	if (!conn || conn->status != CONNECTION_OK)
+		return -1;
+
+	if (!encoding)
+		return -1;
+
+	/* check query buffer overflow */
+	if (sizeof(qbuf) < (sizeof(query) + strlen(encoding)))
+		return -1;
+
+	/* ok, now send a query */
+	sprintf(qbuf, query, encoding);
+	res = PQexec(conn, qbuf);
+
+	if (res == NULL)
+	return -1;
+	if (res->resultStatus != PGRES_COMMAND_OK)
+	status = -1;
+	else
+	{
+		/*
+		 * In protocol 2 we have to assume the setting will stick, and adjust
+		 * our state immediately.  In protocol 3 and up we can rely on the
+		 * backend to report the parameter value, and we'll change state at
+		 * that time.
+		 */
+		if (PG_PROTOCOL_MAJOR(conn->pversion) < 3)
+			pqSaveParameterStatus(conn, "client_encoding", encoding);
+		status = 0;             /* everything is ok */
+	}
+	PQclear(res);
+	return status;
+}
+#endif /* HAVE_PQSETCLIENTENCODING */
 
 #ifndef HAVE_PQESCAPESTRING
 /*
@@ -221,15 +265,51 @@ PQunescapeBytea(const unsigned char *strtext, size_t *retbuflen)
 }
 #endif
 
+#ifndef HAVE_PQESCAPESTRINGCONN
+
+size_t
+PQescapeStringConn(PGconn *conn, char *to, const char *from, 
+	size_t length, int *error)
+{
+	return PQescapeString(to,from,length);
+}
+
+unsigned char *
+PQescapeByteaConn(PGconn *conn, const unsigned char *from, 
+	size_t from_length, size_t *to_length)
+{
+	return PQescapeBytea(from, from_length, to_length);
+}
+
+#endif /* HAVE_PQESCAPESTRINGCONN */
+
+#ifndef HAVE_PQPREPARE
+
+PGresult *
+PQprepare(PGconn *conn, const char *stmtName, const char *query,
+	int nParams, const Oid *paramTypes)
+{
+	rb_raise(rb_ePGError, StringValuePtr("PQprepare not supported by this client version"));
+}
+
+#endif /* HAVE_PQPREPARE */
+
 #ifndef HAVE_PQEXECPARAMS
-#include <ruby.h>
-#include <re.h>
-#include <libpq-fe.h>
+
+PGresult *
+PQexecParams(PGconn *conn, const char *command, int nParams, 
+	const Oid *paramTypes, const char * const * paramValues, const int *paramLengths, 
+	const int *paramFormats, int resultFormat)
+{
+	rb_raise(rb_ePGError, StringValuePtr("PQexecParams not supported by this client version."));
+}
 
 #define BIND_PARAM_PATTERN "\\$(\\d+)"
-#define BindParamNumber(match) (FIX2INT(rb_str_to_inum(rb_reg_nth_match(1, match), 10, 0))-1)
+#include <ruby.h>
+#include <re.h>
 
-PGresult *PQexecParams_compat(PGconn *conn, VALUE command, VALUE values)
+PGresult *
+PQexecParams_compat(PGconn *conn, VALUE command, VALUE values)
 {
     VALUE bind_param_re = rb_reg_new(BIND_PARAM_PATTERN, 7, 0);
     VALUE result = rb_str_buf_new(RSTRING(command)->len);
@@ -250,4 +330,5 @@ PGresult *PQexecParams_compat(PGconn *conn, VALUE command, VALUE values)
 
     return PQexec(conn, StringValuePtr(result));
 }
-#endif
+#endif /* HAVE_PQEXECPARAMS */
+
