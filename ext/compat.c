@@ -1,6 +1,200 @@
+/************************************************
+
+  compat.c -
+
+  Author: matz 
+  created at: Tue May 13 20:07:35 JST 1997
+
+  Author: ematsu
+  modified at: Wed Jan 20 16:41:51 1999
+
+  $Author: jdavis $
+  $Date: 2007-12-04 14:25:44 -0800 (Tue, 04 Dec 2007) $
+************************************************/
+
 #include "compat.h"
 
+
+#ifndef HAVE_PQESCAPESTRINGCONN
+size_t
+PQescapeStringConn(PGconn *conn, char *to, const char *from, 
+	size_t length, int *error)
+{
+	return PQescapeString(to,from,length);
+}
+
+unsigned char *
+PQescapeByteaConn(PGconn *conn, const unsigned char *from, 
+	size_t from_length, size_t *to_length)
+{
+	return PQescapeBytea(from, from_length, to_length);
+}
+#endif /* HAVE_PQESCAPESTRINGCONN */
+
+#ifndef HAVE_PQPREPARE
+PGresult *
+PQprepare(PGconn *conn, const char *stmtName, const char *query,
+	int nParams, const Oid *paramTypes)
+{
+	rb_raise(rb_eStandardError, "PQprepare not supported by this client version.");
+}
+#endif /* HAVE_PQPREPARE */
+
+#ifndef HAVE_PQCONNECTIONUSEDPASSWORD
+int
+PQconnectionUsedPassword(PGconn *conn)
+{
+	rb_raise(rb_eStandardError, 
+		"PQconnectionUsedPassword not supported by this client version.");
+}
+#endif /* HAVE_PQCONNECTIONUSEDPASSWORD */
+
+#ifndef HAVE_PQISTHREADSAFE
+int
+PQisthreadsafe()
+{
+	return Qfalse;
+}
+#endif /* HAVE_PQISTHREADSAFE */
+
+#ifndef HAVE_LO_TRUNCATE
+int
+lo_truncate(PGconn *conn, int fd, size_t len)
+{
+	rb_raise(rb_eStandardError, "lo_truncate not supported by this client version.");
+}
+#endif /* HAVE_LO_TRUNCATE */
+
+#ifndef HAVE_LO_CREATE
+Oid
+lo_create(PGconn *conn, Oid lobjId)
+{
+	rb_raise(rb_eStandardError, "lo_create not supported by this client version.");
+}
+#endif /* HAVE_LO_CREATE */
+
+#ifndef HAVE_PQNPARAMS
+int
+PQnparams(const PGresult *res)
+{
+	rb_raise(rb_eStandardError, "PQnparams not supported by this client version.");
+}
+#endif /* HAVE_PQNPARAMS */
+
+#ifndef HAVE_PQPARAMTYPE
+Oid
+PQparamtype(const PGresult *res, int param_number)
+{
+	rb_raise(rb_eStandardError, "PQparamtype not supported by this client version.");
+}
+#endif /* HAVE_PQPARAMTYPE */
+
+#ifndef HAVE_PQSERVERVERSION
+int
+PQserverVersion(const PGconn* conn)
+{
+	rb_raise(rb_eStandardError, "PQserverVersion not supported by this client version.");
+}
+#endif /* HAVE_PQSERVERVERSION */
+
+#ifndef HAVE_PQSENDDESCRIBEPREPARED
+int
+PQsendDescribePrepared(PGconn *conn, const char *stmtName)
+{
+	rb_raise(rb_eStandardError, "PQsendDescribePrepared not supported by this client version.");
+}
+#endif /* HAVE_PQSENDDESCRIBEPREPARED */
+
+#ifndef HAVE_PQSENDDESCRIBEPORTAL
+int
+PQsendDescribePortal(PGconn *conn, const char *portalName)
+{
+	rb_raise(rb_eStandardError, "PQsendDescribePortal not supported by this client version.");
+}
+#endif /* HAVE_PQSENDDESCRIBEPORTAL */
+
+#ifndef HAVE_PQENCRYPTPASSWORD
+char *
+PQencryptPassword(const char *passwd, const char *user)
+{
+	rb_raise(rb_eStandardError, "PQencryptPassword not supported by this client version.");
+}
+#endif /* HAVE_PQENCRYPTPASSWORD */
+
+#ifndef HAVE_PQEXECPARAMS
+PGresult *
+PQexecParams(PGconn *conn, const char *command, int nParams, 
+	const Oid *paramTypes, const char * const * paramValues, const int *paramLengths, 
+	const int *paramFormats, int resultFormat)
+{
+	rb_raise(rb_eStandardError, "PQexecParams not supported by this client version.");
+}
+
+#define BIND_PARAM_PATTERN "\\$(\\d+)"
+#include <ruby.h>
+#include <re.h>
+PGresult *
+PQexecParams_compat(PGconn *conn, VALUE command, VALUE values)
+{
+    VALUE bind_param_re = rb_reg_new(BIND_PARAM_PATTERN, 7, 0);
+    VALUE result = rb_str_buf_new(RSTRING(command)->len);
+    char* ptr = RSTRING(command)->ptr;
+    int scan = 0;
+    while ((scan = rb_reg_search(bind_param_re, command, scan, 0)) > 0) {
+        VALUE match = rb_backref_get();
+        int pos = BindParamNumber(match);
+        if (pos < RARRAY(values)->len) {
+            rb_str_buf_cat(result, ptr, scan - (ptr - RSTRING(command)->ptr));
+            ptr = RSTRING(command)->ptr + scan;
+            rb_str_buf_append(result, RARRAY(values)->ptr[pos]);
+        }
+        scan += RSTRING(rb_reg_nth_match(0, match))->len;
+        ptr += RSTRING(rb_reg_nth_match(0, match))->len;
+    }
+    rb_str_buf_cat(result, ptr, RSTRING(command)->len - (ptr - RSTRING(command)->ptr));
+
+    return PQexec(conn, StringValuePtr(result));
+}
+#endif /* HAVE_PQEXECPARAMS */
+
+
+/**************************************************************************
+
+IF ANY CODE IS COPIED FROM POSTGRESQL, PLACE IT AFTER THIS COMMENT.
+THE BSD LICENSE REQUIRES THAT YOU MAINTAIN THIS COPYRIGHT NOTICE.
+
+***************************************************************************
+
+Portions of code after this point were copied from the PostgreSQL source
+distribution, available at http://www.postgresql.org
+
+***************************************************************************
+
+Portions Copyright (c) 1996-2007, PostgreSQL Global Development Group
+
+Portions Copyright (c) 1994, The Regents of the University of California
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose, without fee, and without a written agreement
+is hereby granted, provided that the above copyright notice and this
+paragraph and the following two paragraphs appear in all copies.
+
+IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
+DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
+PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+**************************************************************************/
+
 #ifndef HAVE_PQSETCLIENTENCODING
+
 int
 PQsetClientEncoding(PGconn *conn, const char *encoding)
 {
@@ -264,71 +458,4 @@ PQunescapeBytea(const unsigned char *strtext, size_t *retbuflen)
 	return tmpbuf;
 }
 #endif
-
-#ifndef HAVE_PQESCAPESTRINGCONN
-
-size_t
-PQescapeStringConn(PGconn *conn, char *to, const char *from, 
-	size_t length, int *error)
-{
-	return PQescapeString(to,from,length);
-}
-
-unsigned char *
-PQescapeByteaConn(PGconn *conn, const unsigned char *from, 
-	size_t from_length, size_t *to_length)
-{
-	return PQescapeBytea(from, from_length, to_length);
-}
-
-#endif /* HAVE_PQESCAPESTRINGCONN */
-
-#ifndef HAVE_PQPREPARE
-
-PGresult *
-PQprepare(PGconn *conn, const char *stmtName, const char *query,
-	int nParams, const Oid *paramTypes)
-{
-	rb_raise(rb_ePGError, StringValuePtr("PQprepare not supported by this client version"));
-}
-
-#endif /* HAVE_PQPREPARE */
-
-#ifndef HAVE_PQEXECPARAMS
-
-PGresult *
-PQexecParams(PGconn *conn, const char *command, int nParams, 
-	const Oid *paramTypes, const char * const * paramValues, const int *paramLengths, 
-	const int *paramFormats, int resultFormat)
-{
-	rb_raise(rb_ePGError, StringValuePtr("PQexecParams not supported by this client version."));
-}
-
-#define BIND_PARAM_PATTERN "\\$(\\d+)"
-#include <ruby.h>
-#include <re.h>
-
-PGresult *
-PQexecParams_compat(PGconn *conn, VALUE command, VALUE values)
-{
-    VALUE bind_param_re = rb_reg_new(BIND_PARAM_PATTERN, 7, 0);
-    VALUE result = rb_str_buf_new(RSTRING(command)->len);
-    char* ptr = RSTRING(command)->ptr;
-    int scan = 0;
-    while ((scan = rb_reg_search(bind_param_re, command, scan, 0)) > 0) {
-        VALUE match = rb_backref_get();
-        int pos = BindParamNumber(match);
-        if (pos < RARRAY(values)->len) {
-            rb_str_buf_cat(result, ptr, scan - (ptr - RSTRING(command)->ptr));
-            ptr = RSTRING(command)->ptr + scan;
-            rb_str_buf_append(result, RARRAY(values)->ptr[pos]);
-        }
-        scan += RSTRING(rb_reg_nth_match(0, match))->len;
-        ptr += RSTRING(rb_reg_nth_match(0, match))->len;
-    }
-    rb_str_buf_cat(result, ptr, RSTRING(command)->len - (ptr - RSTRING(command)->ptr));
-
-    return PQexec(conn, StringValuePtr(result));
-}
-#endif /* HAVE_PQEXECPARAMS */
 
