@@ -175,10 +175,6 @@ pgconn_connect(argc, argv, self)
         rb_raise(rb_ePGError, StringValuePtr(message));
     }
 
-    if (PQserverVersion(conn) >= 80100) {
-        rb_define_singleton_method(self, "lastval", pgconn_lastval, 0);
-    }
-
     Data_Set_Struct(self, conn);
     return self;
 }
