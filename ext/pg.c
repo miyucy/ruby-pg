@@ -657,10 +657,10 @@ pgconn_error_message(obj)
  * Note that this is a PID on database server host.
  */
 static VALUE
-pgconn_backend_pid(obj)
-	VALUE obj;
+pgconn_backend_pid(self)
+	VALUE self;
 {
-	return INT2NUM(PQbackendPID(get_pgconn(obj)));
+	return INT2NUM(PQbackendPID(get_pgconn(self)));
 }
 
 /*
@@ -671,10 +671,10 @@ pgconn_backend_pid(obj)
  * +false+ otherwise.
  */
 static VALUE
-pgconn_connection_used_password(obj)
-	VALUE obj;
+pgconn_connection_used_password(self)
+	VALUE self;
 {
-	return PQconnectionUsedPassword(get_pgconn(obj)) ? Qtrue : Qfalse;
+	return PQconnectionUsedPassword(get_pgconn(self)) ? Qtrue : Qfalse;
 }
 
 
@@ -1008,10 +1008,61 @@ pgconn_exec_prepared(argc, argv, obj)
 	return rb_pgresult;
 }
 
-// TODO describe_prepared
+/*
+ * call-seq:
+ *    conn.describe_prepared( statement_name ) -> PGresult
+ *
+ * Retrieve information about the prepared statement
+ * _statement_name_.
+ */
+static VALUE
+pgconn_describe_prepared(self, stmt_name)
+	VALUE self, stmt_name;
+{
+	PGconn *conn = get_pgconn(self);
+	PGresult *result;
+	VALUE rb_pgresult;
+	char *stmt;
+	if(stmt_name == Qnil) {
+		stmt = NULL;
+	}
+	else {
+		Check_Type(stmt_name, T_STRING);
+		stmt = StringValuePtr(stmt_name);
+	}
+	result = PQdescribePrepared(conn, stmt);
+	rb_pgresult = pgresult_new(result);
+	pgresult_check(self, rb_pgresult);
+	return rb_pgresult;
+}
 
 
-// TODO describe_portal
+/*
+ * call-seq:
+ *    conn.describe_portal( portal_name ) -> PGresult
+ *
+ * Retrieve information about the portal _portal_name_.
+ */
+static VALUE
+pgconn_describe_portal(self, stmt_name)
+	VALUE self, stmt_name;
+{
+	PGconn *conn = get_pgconn(self);
+	PGresult *result;
+	VALUE rb_pgresult;
+	char *stmt;
+	if(stmt_name == Qnil) {
+		stmt = NULL;
+	}
+	else {
+		Check_Type(stmt_name, T_STRING);
+		stmt = StringValuePtr(stmt_name);
+	}
+	result = PQdescribePortal(conn, stmt);
+	rb_pgresult = pgresult_new(result);
+	pgresult_check(self, rb_pgresult);
+	return rb_pgresult;
+}
 
 
 // TODO make_empty_pgresult
