@@ -20,13 +20,13 @@ end
 dir_config('pgsql', config_value('include'), config_value('lib'))
 
 required_libraries = []
-desired_functions = %w(PQsetClientEncoding pg_encoding_to_char PQfreemem)
+desired_functions = %w(PQsetClientEncoding pg_encoding_to_char PQfreemem PQserverVersion)
 compat_functions = %w(PQescapeString PQexecParams)
 
 if have_build_env
   required_libraries.each(&method(:have_library))
   desired_functions.each(&method(:have_func))
-  $objs = ['postgres.o'] if compat_functions.all?(&method(:have_func))
+  $objs = ['postgres.o','libpq-compat.o'] if compat_functions.all?(&method(:have_func))
   $CFLAGS << ' -Wall '
   create_makefile("postgres")
 else

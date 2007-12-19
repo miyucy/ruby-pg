@@ -25,6 +25,22 @@
 #include <stdlib.h>
 #include <sys/types.h>
 
+#ifndef HAVE_PQSERVERVERSION
+static int
+PQserverVersion(const PGconn *conn)
+{
+	rb_raise(rb_eArgError,"this version of libpq doesn't support PQserverVersion");
+}
+#endif /* HAVE_PQSERVERVERSION */
+
+#ifndef RSTRING_LEN
+#define RSTRING_LEN(x) RSTRING((x))->len
+#endif /* RSTRING_LEN */
+
+#ifndef RSTRING_PTR
+#define RSTRING_PTR(x) RSTRING((x))->ptr
+#endif /* RSTRING_PTR */
+
 #ifndef HAVE_PG_ENCODING_TO_CHAR
 #define pg_encoding_to_char(x) "SQL_ASCII"
 #endif
@@ -175,6 +191,12 @@ pgconn_connect(argc, argv, self)
         rb_raise(rb_ePGError, StringValuePtr(message));
     }
 
+#ifndef HAVE_PQSERVERVERSION
+    if (PQserverVersion(conn) >= 80100) {
+        rb_define_singleton_method(self, "lastval", pgconn_lastval, 0);
+    }
+#endif /* HAVE_PQSERVERVERSION */
+
     Data_Set_Struct(self, conn);
     return self;
 }
@@ -255,8 +277,8 @@ pgconn_s_quote(self, obj)
     if (TYPE(obj) == T_STRING) {
         /* length * 2 because every char could require escaping */
         /* + 2 for the quotes, + 1 for the null terminator */
-        quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
-        size = PQescapeString(quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len);
+        quoted = ALLOCA_N(char, RSTRING_LEN(obj) * 2 + 2 + 1);
+        size = PQescapeString(quoted + 1, RSTRING_PTR(obj), RSTRING_LEN(obj));
         *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
         result = rb_str_new(quoted, size + 2);
         OBJ_INFECT(result, obj);
@@ -295,8 +317,9 @@ pgconn_quote(self, obj)
     if (TYPE(obj) == T_STRING) {
         /* length * 2 because every char could require escaping */
         /* + 2 for the quotes, + 1 for the null terminator */
-        quoted = ALLOCA_N(char, RSTRING(obj)->len * 2 + 2 + 1);
-        size = PQescapeStringConn(get_pgconn(self),quoted + 1, RSTRING(obj)->ptr, RSTRING(obj)->len, &error);
+        quoted = ALLOCA_N(char, RSTRING_LEN(obj) * 2 + 2 + 1);
+        size = PQescapeStringConn(get_pgconn(self),quoted + 1, 
+				RSTRING_PTR(obj), RSTRING_LEN(obj), &error);
         *quoted = *(quoted + size + 1) = SINGLE_QUOTE;
         result = rb_str_new(quoted, size + 2);
         OBJ_INFECT(result, obj);
@@ -317,8 +340,8 @@ pgconn_s_quote_connstr(string)
 
     Check_Type(string, T_STRING);
     
-	ptr = RSTRING(string)->ptr;
-	len = RSTRING(string)->len;
+	ptr = RSTRING_PTR(string);
+	len = RSTRING_LEN(string);
     str = ALLOCA_N(char, len * 2 + 2 + 1);
 	str[j++] = '\'';
 	for(i = 0; i < len; i++) {
@@ -362,8 +385,8 @@ pgconn_s_quote_ident(self, string)
 
     Check_Type(string, T_STRING);
     
-	ptr = RSTRING(string)->ptr;
-	len = RSTRING(string)->len;
+	ptr = RSTRING_PTR(string);
+	len = RSTRING_LEN(string);
     str = ALLOCA_N(char, len * 2 + 2 + 1);
 	str[j++] = '"';
 	for(i = 0; i < len; i++) {
@@ -393,8 +416,8 @@ pgconn_s_escape(self, string)
 
     Check_Type(string, T_STRING);
     
-    escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
-    size = PQescapeString(escaped, RSTRING(string)->ptr, RSTRING(string)->len);
+    escaped = ALLOCA_N(char, RSTRING_LEN(string) * 2 + 1);
+    size = PQescapeString(escaped, RSTRING_PTR(string), RSTRING_LEN(string));
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
     return result;
@@ -414,8 +437,9 @@ pgconn_escape(self, string)
 
     Check_Type(string, T_STRING);
     
-    escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
-    size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING(string)->ptr, RSTRING(string)->len, &error);
+    escaped = ALLOCA_N(char, RSTRING_LEN(string) * 2 + 1);
+    size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING_PTR(string),
+				RSTRING_LEN(string), &error);
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
     return result;
@@ -446,8 +470,8 @@ pgconn_s_escape_bytea(self, obj)
     VALUE ret;
     
     Check_Type(obj, T_STRING);
-    from      = RSTRING(obj)->ptr;
-    from_len  = RSTRING(obj)->len;
+    from      = RSTRING_PTR(obj);
+    from_len  = RSTRING_LEN(obj);
     
     to = (char *)PQescapeBytea(from, from_len, &to_len);
     
@@ -484,8 +508,8 @@ pgconn_escape_bytea(self, obj)
     VALUE ret;
     
     Check_Type(obj, T_STRING);
-    from      = RSTRING(obj)->ptr;
-    from_len  = RSTRING(obj)->len;
+    from      = RSTRING_PTR(obj);
+    from_len  = RSTRING_LEN(obj);
     
     to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
     
@@ -649,13 +673,13 @@ translate_to_pg(VALUE value, char const** result, int* length, int* format)
       return;
     case T_STRING:
       *result = StringValuePtr(value);
-      *length = RSTRING(value)->len;
+      *length = RSTRING_LEN(value);
       *format = BINARY_FORMAT;
       return;
     default:  {
         VALUE formatted = pgconn_s_format(rb_cPGconn, value);
         *result = StringValuePtr(formatted);
-        *length = RSTRING(formatted)->len;
+        *length = RSTRING_LEN(formatted);
         *format = TEXT_FORMAT;
       }
     }
@@ -731,7 +755,7 @@ pgconn_exec(argc, argv, obj)
     case PGRES_BAD_RESPONSE:
     case PGRES_FATAL_ERROR:
     case PGRES_NONFATAL_ERROR:
-      msg = RSTRING(rb_str_new2(PQresultErrorMessage(result)))->ptr;
+      msg = RSTRING_PTR(rb_str_new2(PQresultErrorMessage(result)));
       break;
     default:
       msg = "internal error : unknown result status.";
@@ -767,7 +791,7 @@ pgconn_async_exec(obj, str)
         PQclear(result);
     }
 
-    if (!PQsendQuery(conn, RSTRING(str)->ptr)) {
+    if (!PQsendQuery(conn, RSTRING_PTR(str))) {
         rb_raise(rb_ePGError, PQerrorMessage(conn));
     }
 
@@ -810,7 +834,7 @@ pgconn_async_exec(obj, str)
     case PGRES_BAD_RESPONSE:
     case PGRES_FATAL_ERROR:
     case PGRES_NONFATAL_ERROR:
-      msg = RSTRING(rb_str_new2(PQresultErrorMessage(result)))->ptr;
+      msg = RSTRING_PTR(rb_str_new2(PQresultErrorMessage(result)));
       break;
     default:
       msg = "internal error : unknown result status.";
@@ -921,9 +945,9 @@ pgconn_insert_table(obj, table, values)
         }
     }
     
-    buffer = rb_str_new(0, RSTRING(table)->len + 17 + 1);
+    buffer = rb_str_new(0, RSTRING_LEN(table) + 17 + 1);
     /* starts query */
-    snprintf(RSTRING(buffer)->ptr, RSTRING(buffer)->len, "copy %s from stdin ", StringValuePtr(table));
+    snprintf(RSTRING_PTR(buffer), RSTRING_LEN(buffer), "copy %s from stdin ", StringValuePtr(table));
     
     result = PQexec(conn, StringValuePtr(buffer));
     if (!result){
@@ -941,7 +965,7 @@ pgconn_insert_table(obj, table, values)
             } else {
                 s = rb_obj_as_string(row->ptr[j]);
                 rb_funcall(s,pg_gsub_bang_id,2,pg_escape_regex,pg_escape_str);
-                rb_str_cat(buffer, StringValuePtr(s), RSTRING(s)->len);
+                rb_str_cat(buffer, StringValuePtr(s), RSTRING_LEN(s));
             }
         }
         rb_str_cat(buffer, "\n\0", 2);
@@ -992,7 +1016,7 @@ pgconn_getline(obj)
     str = rb_tainted_str_new(0, size);
 
     for (;;) {
-        ret = PQgetline(conn, RSTRING(str)->ptr + bytes, size - bytes);
+        ret = PQgetline(conn, RSTRING_PTR(str) + bytes, size - bytes);
         switch (ret) {
         case EOF:
           return Qnil;
@@ -1178,7 +1202,7 @@ pgconn_error(obj)
     return rb_tainted_str_new2(error);
 }
 
-/*
+/*TODO broken for ruby 1.9
  * call-seq:
  *    conn.trace( port )
  * 
@@ -1190,12 +1214,12 @@ static VALUE
 pgconn_trace(obj, port)
     VALUE obj, port;
 {
-    OpenFile* fp;
+    //OpenFile* fp;
 
     Check_Type(port, T_FILE);
-    GetOpenFile(port, fp);
+    //GetOpenFile(port, fp);
 
-    PQtrace(get_pgconn(obj), fp->f2?fp->f2:fp->f);
+    //PQtrace(get_pgconn(obj), fp->f2?fp->f2:fp->f);
 
     return obj;
 }
@@ -2283,7 +2307,7 @@ loread_all(obj)
 
     str = rb_tainted_str_new(0,siz);
     for (;;) {
-        n = lo_read(pglarge->pgconn, pglarge->lo_fd, RSTRING(str)->ptr + bytes,siz - bytes);
+        n = lo_read(pglarge->pgconn, pglarge->lo_fd, RSTRING_PTR(str) + bytes,siz - bytes);
         if (n == 0 && bytes == 0) return Qnil;
         bytes += n;
         if (bytes < siz ) break;
@@ -2328,7 +2352,7 @@ pglarge_read(argc, argv, obj)
         rb_raise(rb_ePGError, "error while reading");
     }
     if (len == 0) return Qnil;
-    RSTRING(str)->len = len;
+    RSTRING_LEN(str) = len;
     return str;
 }
 
@@ -2348,10 +2372,11 @@ pglarge_write(obj, buffer)
 
     Check_Type(buffer, T_STRING);
 
-    if( RSTRING(buffer)->len < 0) {
+    if( RSTRING_LEN(buffer) < 0) {
         rb_raise(rb_ePGError, "write buffer zero string");
     }
-    if((n = lo_write(pglarge->pgconn, pglarge->lo_fd, StringValuePtr(buffer), RSTRING(buffer)->len)) == -1) {
+    if((n = lo_write(pglarge->pgconn, pglarge->lo_fd, StringValuePtr(buffer), 
+				RSTRING_LEN(buffer))) == -1) {
         rb_raise(rb_ePGError, "buffer truncated during write");
     }
   
