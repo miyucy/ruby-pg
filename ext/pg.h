@@ -4,7 +4,6 @@
 
 #include "ruby.h"
 #include "rubyio.h"
-#include "st.h"
 #include "libpq-fe.h"
 #include "libpq/libpq-fs.h"              /* large-object interface */
 

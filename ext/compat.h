@@ -6,13 +6,20 @@
 
 #include "ruby.h"
 #include "rubyio.h"
-#include "st.h"
 #include "libpq-fe.h"
 #include "libpq/libpq-fs.h"              /* large-object interface */
 
 #if RUBY_VERSION_CODE < 180
 #define rb_check_string_type(x) rb_check_convert_type(x, T_STRING, "String", "to_str")
 #endif /* RUBY_VERSION_CODE < 180 */
+
+#ifndef RSTRING_LEN
+#define RSTRING_LEN(x) RSTRING((x))->len
+#endif /* RSTRING_LEN */
+
+#ifndef RSTRING_PTR
+#define RSTRING_PTR(x) RSTRING((x))->ptr
+#endif /* RSTRING_PTR */
 
 #ifndef StringValuePtr
 #define StringValuePtr(x) STR2CSTR(x)

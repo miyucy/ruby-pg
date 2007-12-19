@@ -45,7 +45,7 @@ static int build_key_value_string_i(VALUE key, VALUE value, VALUE result);
 static PGconn *get_pgconn(VALUE self);
 static VALUE pgconn_finish(VALUE self);
 
-static VALUE pg_escape_regex;
+//static VALUE pg_escape_regex;
 static VALUE pg_escape_str;
 static ID    pg_gsub_bang_id;
 
@@ -59,8 +59,8 @@ pgconn_s_quote_connstr(string)
 
     Check_Type(string, T_STRING);
     
-	ptr = RSTRING(string)->ptr;
-	len = RSTRING(string)->len;
+	ptr = RSTRING_PTR(string);
+	len = RSTRING_LEN(string);
     str = ALLOCA_N(char, len * 2 + 2 + 1);
 	str[j++] = '\'';
 	for(i = 0; i < len; i++) {
@@ -74,17 +74,19 @@ pgconn_s_quote_connstr(string)
     return result;
 }
 
+//TODO broken
 static int
 build_key_value_string_i(key, value, result)
     VALUE key, value, result;
 {
     VALUE key_value;
-    if (key == Qundef) return ST_CONTINUE;
+    //if (key == Qundef) return ST_CONTINUE;
     key_value = (TYPE(key) == T_STRING ? rb_str_dup(key) : rb_obj_as_string(key));
     rb_str_cat(key_value, "=", 1);
     rb_str_concat(key_value, pgconn_s_quote_connstr(value));
     rb_ary_push(result, key_value);
-    return ST_CONTINUE;
+    //return ST_CONTINUE;
+	return 0;
 }
 
 static void
@@ -101,6 +103,7 @@ pgconn_alloc(klass)
     return Data_Wrap_Struct(klass, 0, free_pgconn, NULL);
 }
 
+//TODO broken
 static PGconn *
 try_connectdb(arg)
     VALUE arg;
@@ -110,11 +113,11 @@ try_connectdb(arg)
     if (!NIL_P(conninfo = rb_check_string_type(arg))) {
         /* do nothing */
     }
-    else if (!NIL_P(conninfo = rb_check_hash_type(arg))) {
-        VALUE key_values = rb_ary_new2(RHASH(conninfo)->tbl->num_entries);
-        rb_hash_foreach(conninfo, build_key_value_string_i, key_values);
-        conninfo = rb_ary_join(key_values, rb_str_new2(" "));
-    }
+    //else if (!NIL_P(conninfo = rb_check_hash_type(arg))) {
+    //    VALUE key_values = rb_ary_new2(RHASH(conninfo)->tbl->num_entries);
+    //    rb_hash_foreach(conninfo, build_key_value_string_i, key_values);
+    //    conninfo = rb_ary_join(key_values, rb_str_new2(" "));
+    //}
     else {
         return NULL;
     }
@@ -816,8 +819,8 @@ pgconn_exec_params(argc, argv, self)
 		}
 		Check_Type(param_value, T_STRING);
 		paramTypes[i] = NUM2INT(param_type);
-		paramValues[i] = RSTRING(param_value)->ptr;
-		paramLengths[i] = RSTRING(param_value)->len + 1;
+		paramValues[i] = RSTRING_PTR(param_value);
+		paramLengths[i] = RSTRING_LEN(param_value) + 1;
 		paramFormats[i] = NUM2INT(param_format);
 	}
 	
@@ -989,8 +992,8 @@ pgconn_exec_prepared(argc, argv, self)
 			param_format = INT2NUM(0);
 		}
 		Check_Type(param_value, T_STRING);
-		paramValues[i] = RSTRING(param_value)->ptr;
-		paramLengths[i] = RSTRING(param_value)->len + 1;
+		paramValues[i] = RSTRING_PTR(param_value);
+		paramLengths[i] = RSTRING_LEN(param_value) + 1;
 		paramFormats[i] = NUM2INT(param_format);
 	}
 	
@@ -1094,16 +1097,16 @@ pgconn_s_escape(self, string)
 
     Check_Type(string, T_STRING);
     
-    escaped = ALLOCA_N(char, RSTRING(string)->len * 2 + 1);
+    escaped = ALLOCA_N(char, RSTRING_LEN(string) * 2 + 1);
     if(CLASS_OF(self) == rb_cPGconn) {
-    	size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING(string)->ptr,
-			RSTRING(string)->len, &error);
+    	size = PQescapeStringConn(get_pgconn(self),escaped, RSTRING_PTR(string),
+			RSTRING_LEN(string), &error);
 		if(error) {
 			rb_raise(rb_ePGError, PQerrorMessage(get_pgconn(self)));
 		}
     } else {
-    	size = PQescapeString(escaped, RSTRING(string)->ptr,
-			RSTRING(string)->len);
+    	size = PQescapeString(escaped, RSTRING_PTR(string),
+			RSTRING_LEN(string));
     }
     result = rb_str_new(escaped, size);
     OBJ_INFECT(result, string);
@@ -1144,8 +1147,8 @@ pgconn_s_escape_bytea(self, str)
     VALUE ret;
     
     Check_Type(str, T_STRING);
-    from      = RSTRING(str)->ptr;
-    from_len  = RSTRING(str)->len;
+    from      = RSTRING_PTR(str);
+    from_len  = RSTRING_LEN(str);
     
     if(CLASS_OF(self) == rb_cPGconn) {
         to = (char *)PQescapeByteaConn(get_pgconn(self),(unsigned char*)from, from_len, &to_len);
@@ -1486,8 +1489,8 @@ pgconn_put_copy_data(self, buffer)
 	PGconn *conn = get_pgconn(self);
 	Check_Type(buffer, T_STRING);
 
-	ret = PQputCopyData(conn, RSTRING(buffer)->ptr,
-			RSTRING(buffer)->len);
+	ret = PQputCopyData(conn, RSTRING_PTR(buffer),
+			RSTRING_LEN(buffer));
 	if(ret == -1) {
 		error = rb_exc_new2(rb_ePGError, PQerrorMessage(conn));
 		rb_iv_set(error, "@connection", self);
@@ -1514,12 +1517,12 @@ static VALUE
 pgconn_trace(self, port)
     VALUE self, port;
 {
-    OpenFile* fp;
+    //OpenFile* fp;
 
     Check_Type(port, T_FILE);
-    GetOpenFile(port, fp);
+    //GetOpenFile(port, fp);
 
-    PQtrace(get_pgconn(self), fp->f2?fp->f2:fp->f);
+    //PQtrace(get_pgconn(self), fp->f2?fp->f2:fp->f);
 
     return self;
 }
@@ -1568,7 +1571,7 @@ pgconn_set_client_encoding(self, str)
 {
     Check_Type(str, T_STRING);
     if ((PQsetClientEncoding(get_pgconn(self), StringValuePtr(str))) == -1){
-        rb_raise(rb_ePGError, "invalid encoding name %s",str);
+        rb_raise(rb_ePGError, "invalid encoding name %s",StringValuePtr(str));
     }
     return Qnil;
 }
@@ -1645,7 +1648,7 @@ pgconn_getline(self)
     str = rb_tainted_str_new(0, size);
 
     for (;;) {
-        ret = PQgetline(conn, RSTRING(str)->ptr + bytes, size - bytes);
+        ret = PQgetline(conn, RSTRING_PTR(str) + bytes, size - bytes);
         switch (ret) {
         case EOF:
           return Qnil;
@@ -1873,17 +1876,18 @@ pgconn_lowrite(self, in_lo_desc, buffer)
 
     Check_Type(buffer, T_STRING);
 
-    if( RSTRING(buffer)->len < 0) {
+    if( RSTRING_LEN(buffer) < 0) {
         rb_raise(rb_ePGError, "write buffer zero string");
     }
-    if((n = lo_write(conn, fd, StringValuePtr(buffer), RSTRING(buffer)->len)) < 0) {
+    if((n = lo_write(conn, fd, StringValuePtr(buffer), 
+				RSTRING_LEN(buffer))) < 0) {
         rb_raise(rb_ePGError, "lo_write failed");
     }
   
     return INT2FIX(n);
 }
 
-/*
+/*TODO broken
  * call-seq:
  *    conn.lo_read( lo_desc, len ) -> String
  *
@@ -1910,7 +1914,7 @@ pgconn_loread(self, in_lo_desc, in_len)
     if (ret == 0)
 		return Qnil;
 
-    RSTRING(str)->len = ret;
+    //RSTRING_LEN(str) = ret;
     return str;
 }
 
@@ -2576,8 +2580,8 @@ void
 Init_pg()
 {
     pg_gsub_bang_id = rb_intern("gsub!");
-    pg_escape_regex = rb_reg_new("([\\t\\n\\\\])", 10, 0);
-    rb_global_variable(&pg_escape_regex);
+    //TODO pg_escape_regex = rb_reg_new("([\\t\\n\\\\])", 10, 0);
+    //rb_global_variable(&pg_escape_regex);
     pg_escape_str = rb_str_new("\\\\\\1", 4);
     rb_global_variable(&pg_escape_str);
 
