@@ -191,7 +191,7 @@ pgconn_connect(argc, argv, self)
         rb_raise(rb_ePGError, StringValuePtr(message));
     }
 
-#ifndef HAVE_PQSERVERVERSION
+#ifdef HAVE_PQSERVERVERSION
     if (PQserverVersion(conn) >= 80100) {
         rb_define_singleton_method(self, "lastval", pgconn_lastval, 0);
     }
