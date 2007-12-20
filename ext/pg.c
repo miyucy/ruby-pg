@@ -103,7 +103,7 @@ pgconn_alloc(klass)
     return Data_Wrap_Struct(klass, 0, free_pgconn, NULL);
 }
 
-//TODO broken
+//TODO broken on 1.9
 static PGconn *
 try_connectdb(arg)
     VALUE arg;
@@ -1434,13 +1434,6 @@ pgconn_notifies(self)
     VALUE hash;
 	VALUE sym_relname, sym_be_pid, sym_extra;
 	VALUE relname, be_pid, extra;
-	VALUE error;
-
-    if (PQconsumeInput(conn) == 0) {
-		error = rb_exc_new2(rb_ePGError, PQerrorMessage(conn));
-		rb_iv_set(error, "@connection", self);
-		rb_raise(error, PQerrorMessage(conn));
-    }
 
 	sym_relname = ID2SYM(rb_intern("relname"));
 	sym_be_pid = ID2SYM(rb_intern("be_pid"));
@@ -1499,9 +1492,87 @@ pgconn_put_copy_data(self, buffer)
 	return (ret) ? Qtrue : Qfalse;
 }
 
-//TODO put_copy_end
+/*
+ * call-seq:
+ *    conn.put_copy_end( [ error_message ] ) -> Boolean
+ *
+ * Sends end-of-data indication to the server.
+ *
+ * _error_message_ is an optional parameter, and if set,
+ * forces the COPY command to fail with the string
+ * _error_message_.
+ *
+ * Returns true if the end-of-data was sent, false if it was
+ * not sent (false is only possible if the connection
+ * is in nonblocking mode, and this command would block).
+ */ 
+static VALUE
+pgconn_put_copy_end(argc, argv, self)
+	int argc;
+	VALUE *argv;
+	VALUE self;
+{
+    VALUE str;
+	VALUE error;
+	int ret;
+	char *error_message = NULL;
+    PGconn *conn = get_pgconn(self);
+    
+    if (rb_scan_args(argc, argv, "01", &str) == 0)
+        error_message = NULL;
+    else
+        error_message = StringValuePtr(str);
+  
+  	ret = PQputCopyEnd(conn, error_message);
+	if(ret == -1) {
+		error = rb_exc_new2(rb_ePGError, PQerrorMessage(conn));
+		rb_iv_set(error, "@connection", self);
+		rb_raise(error, PQerrorMessage(conn));
+	}
+	return (ret) ? Qtrue : Qfalse;
+}
 
-//TODO get_copy_data
+/*
+ * call-seq:
+ *    conn.get_copy_data( [ async = false ] ) -> String
+ *
+ * Return a string containing one row of data, +nil+
+ * if the copy is done, or +false+ if the call would 
+ * block (only possible if _async_ is true).
+ *
+ */
+static VALUE
+pgconn_get_copy_data( argc, argv, self )
+	int argc;
+	VALUE *argv;
+	VALUE self;
+{
+    VALUE async_in;
+	VALUE error;
+	int ret;
+	int async;
+	char *buffer;
+    PGconn *conn = get_pgconn(self);
+    
+    if (rb_scan_args(argc, argv, "01", &async_in) == 0)
+        async = 0;
+    else
+		async = (async_in == Qfalse || async_in == Qnil) ? 0 : 1;
+
+  	ret = PQgetCopyData(conn, &buffer, async);
+	if(ret == -2) { // error
+		error = rb_exc_new2(rb_ePGError, PQerrorMessage(conn));
+		rb_iv_set(error, "@connection", self);
+		rb_raise(error, PQerrorMessage(conn));
+	}
+	if(ret == -1) { // No data left
+		return Qnil;
+	}
+	if(ret == 0) { // would block
+		return Qfalse;
+	}
+	return rb_str_new(buffer, ret);
+}
 
 //TODO set_error_verbosity
 
@@ -1579,107 +1650,6 @@ pgconn_set_client_encoding(self, str)
 /**** TODO ?????????? ******/
 
 
-/*
- * call-seq:
- *    conn.get_notify()
- *
- * Returns an array of the unprocessed notifiers.
- * If there is no unprocessed notifier, it returns +nil+.
- */
-static VALUE
-pgconn_get_notify(self)
-    VALUE self;
-{
-    PGconn* conn = get_pgconn(self);
-    PGnotify *notify;
-    VALUE ary;
-
-    if (PQconsumeInput(conn) == 0) {
-        rb_raise(rb_ePGError, PQerrorMessage(conn));
-    }
-    /* gets notify and builds result */
-    notify = PQnotifies(conn);
-    if (notify == NULL) {
-        /* there are no unhandled notifications */
-        return Qnil;
-    }
-    ary = rb_ary_new3(2, rb_tainted_str_new2(notify->relname), INT2NUM(notify->be_pid));
-    PQfreemem(notify);
-
-    /* returns result */
-    return ary;
-}
-
-/*
- * call-seq:
- *    conn.putline()
- *
- * Sends the string to the backend server.
- * Users must send a single "." to denote the end of data transmission.
- */
-static VALUE
-pgconn_putline(self, str)
-    VALUE self, str;
-{
-    Check_Type(str, T_STRING);
-    PQputline(get_pgconn(self), StringValuePtr(str));
-    return self;
-}
-
-/*
- * call-seq:
- *    conn.getline()
- *
- * Reads a line from the backend server into internal buffer.
- * Returns +nil+ for EOF, +0+ for success, +1+ for buffer overflowed.
- * You need to ensure single "." from backend to confirm  transmission completion.
- * The sample program <tt>psql.rb</tt> (see source for postgres) treats this copy protocol right.
- */
-static VALUE
-pgconn_getline(self)
-    VALUE self;
-{
-    PGconn *conn = get_pgconn(self);
-    VALUE str;
-    long size = BUFSIZ;
-    long bytes = 0;
-    int  ret;
-    
-    str = rb_tainted_str_new(0, size);
-
-    for (;;) {
-        ret = PQgetline(conn, RSTRING_PTR(str) + bytes, size - bytes);
-        switch (ret) {
-        case EOF:
-          return Qnil;
-        case 0:
-          rb_str_resize(str, strlen(StringValuePtr(str)));
-          return str;
-        }
-        bytes += BUFSIZ;
-        size += BUFSIZ;
-        rb_str_resize(str, size);
-    }
-    return Qnil;
-}
-
-/*
- * call-seq:
- *    conn.endcopy()
- *
- * Waits until the backend completes the copying.
- * You should call this method after #putline or #getline.
- * Returns +nil+ on success; raises an exception otherwise.
- */
-static VALUE
-pgconn_endcopy(self)
-    VALUE self;
-{
-    if (PQendcopy(get_pgconn(self)) == 1) {
-        rb_raise(rb_ePGError, "cannot complete copying");
-    }
-    return Qnil;
-}
 
 static void
 notice_proxy(self, message)
@@ -2684,8 +2654,8 @@ Init_pg()
     rb_define_method(rb_cPGconn, "exec_params", pgconn_exec_params, -1);
     rb_define_method(rb_cPGconn, "prepare", pgconn_prepare, -1);
     rb_define_method(rb_cPGconn, "exec_prepared", pgconn_exec_prepared, -1);
-    rb_define_method(rb_cPGconn, "describe_prepared", pgconn_prepare, -1);
-    rb_define_method(rb_cPGconn, "describe_portal", pgconn_exec_prepared, -1);
+    rb_define_method(rb_cPGconn, "describe_prepared", pgconn_describe_prepared, 1);
+    rb_define_method(rb_cPGconn, "describe_portal", pgconn_describe_portal, 1);
     rb_define_method(rb_cPGconn, "escape_string", pgconn_s_escape, 1);
 	rb_define_alias(rb_cPGconn, "escape", "escape_string");
     rb_define_method(rb_cPGconn, "escape_bytea", pgconn_s_escape_bytea, 1);
@@ -2718,8 +2688,8 @@ Init_pg()
 
 	/* COPY */
     rb_define_method(rb_cPGconn, "put_copy_data", pgconn_put_copy_data, 1);
-    //rb_define_method(rb_cPGconn, "put_copy_end", pgconn_put_copy_end, 1);
-    //rb_define_method(rb_cPGconn, "get_copy_data", pgconn_get_copy_data, 2);
+    rb_define_method(rb_cPGconn, "put_copy_end", pgconn_put_copy_end, -1);
+    rb_define_method(rb_cPGconn, "get_copy_data", pgconn_get_copy_data, -1);
 
 	/* Control Functions */
     //rb_define_method(rb_cPGconn, "set_error_verbosity", pgconn_set_error_verbosity, 0);

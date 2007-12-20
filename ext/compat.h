@@ -63,6 +63,14 @@ PGresult *PQprepare(PGconn *conn, const char *stmtName, const char *query,
 	int nParams, const Oid *paramTypes);
 #endif /* HAVE_PQPREPARE */
 
+#ifndef HAVE_PQDESCRIBEPREPARED
+PGresult * PQdescribePrepared(PGconn *conn, const char *stmtName);
+#endif /* HAVE_PQDESCRIBEPREPARED */
+
+#ifndef HAVE_PQDESCRIBEPORTAL
+PGresult * PQdescribePortal(PGconn *conn, const char *portalName);
+#endif /* HAVE_PQDESCRIBEPORTAL */
+
 #ifndef HAVE_PQCONNECTIONUSEDPASSWORD
 int PQconnectionUsedPassword(PGconn *conn);
 #endif /* HAVE_PQCONNECTIONUSEDPASSWORD */

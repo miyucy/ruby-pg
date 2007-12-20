@@ -33,6 +33,8 @@ desired_functions = %w(
 	PQsendDescribePrepared
 	PQsendDescribePortal
 	PQencryptPassword
+	PQdescribePrepared
+	PQdescribePortal
 	lo_create
 	lo_truncate
 	pg_encoding_to_char 

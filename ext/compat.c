@@ -14,6 +14,21 @@
 
 #include "compat.h"
 
+#ifndef HAVE_PQDESCRIBEPREPARED
+PGresult *
+PQdescribePrepared(PGconn *conn, const char *stmtName)
+{
+	rb_raise(rb_eStandardError, "PQdescribePrepared not supported by this client version.");
+}
+#endif /* HAVE_PQDESCRIBEPREPARED */
+
+#ifndef HAVE_PQDESCRIBEPORTAL
+PGresult *
+PQdescribePortal(PGconn *conn, const char *portalName)
+{
+	rb_raise(rb_eStandardError, "PQdescribePortal not supported by this client version.");
+}
+#endif /* HAVE_PQDESCRIBEPORTAL */
 
 #ifndef HAVE_PQESCAPESTRINGCONN
 size_t
