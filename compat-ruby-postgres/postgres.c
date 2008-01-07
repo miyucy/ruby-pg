@@ -14,8 +14,18 @@
 
 #include "ruby.h"
 #include "rubyio.h"
+
+#if RUBY_VM != 1
+#define RUBY_18_COMPAT
+#endif
+
+#ifdef RUBY_18_COMPAT
 #include "st.h"
 #include "intern.h"
+#else
+#include "ruby/st.h"
+#include "ruby/intern.h"
+#endif
 
 /* grep '^#define' $(pg_config --includedir)/server/catalog/pg_type.h | grep OID */
 #include "type-oids.h"
@@ -32,6 +42,10 @@ PQserverVersion(const PGconn *conn)
 	rb_raise(rb_eArgError,"this version of libpq doesn't support PQserverVersion");
 }
 #endif /* HAVE_PQSERVERVERSION */
+
+#ifndef RHASH_SIZE
+#define RHASH_SIZE(x) RHASH((x))->tbl->num_entries
+#endif /* RHASH_SIZE */
 
 #ifndef RSTRING_LEN
 #define RSTRING_LEN(x) RSTRING((x))->len
@@ -133,7 +147,7 @@ try_connectdb(arg)
         /* do nothing */
     }
     else if (!NIL_P(conninfo = rb_check_hash_type(arg))) {
-        VALUE key_values = rb_ary_new2(RHASH(conninfo)->tbl->num_entries);
+        VALUE key_values = rb_ary_new2(RHASH_SIZE(conninfo));
         rb_hash_foreach(conninfo, build_key_value_string_i, key_values);
         conninfo = rb_ary_join(key_values, rb_str_new2(" "));
     }
@@ -465,21 +479,19 @@ pgconn_s_escape_bytea(self, obj)
     VALUE self;
     VALUE obj;
 {
-    char *from, *to;
+    unsigned char *from, *to;
     size_t from_len, to_len;
     VALUE ret;
     
     Check_Type(obj, T_STRING);
-    from      = RSTRING_PTR(obj);
+    from      = (unsigned char*)RSTRING_PTR(obj);
     from_len  = RSTRING_LEN(obj);
     
-    to = (char *)PQescapeBytea(from, from_len, &to_len);
+    to = PQescapeBytea(from, from_len, &to_len);
     
-    ret = rb_str_new(to, to_len - 1);
+    ret = rb_str_new((char*)to, to_len - 1);
     OBJ_INFECT(ret, obj);
-    
     PQfreemem(to);
-    
     return ret;
 }
 
@@ -503,21 +515,19 @@ pgconn_escape_bytea(self, obj)
     VALUE self;
     VALUE obj;
 {
-    char *from, *to;
+    unsigned char *from, *to;
     size_t from_len, to_len;
     VALUE ret;
     
     Check_Type(obj, T_STRING);
-    from      = RSTRING_PTR(obj);
+    from      = (unsigned char*)RSTRING_PTR(obj);
     from_len  = RSTRING_LEN(obj);
     
-    to = (char *)PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
+    to = PQescapeByteaConn(get_pgconn(self),from, from_len, &to_len);
     
-    ret = rb_str_new(to, to_len - 1);
+    ret = rb_str_new((char*)to, to_len - 1);
     OBJ_INFECT(ret, obj);
-    
     PQfreemem(to);
-    
     return ret;
 }
 
@@ -535,16 +545,16 @@ static VALUE
 pgconn_s_unescape_bytea(self, obj)
     VALUE self, obj;
 {
-    char *from, *to;
+    unsigned char *from, *to;
     size_t to_len;
     VALUE ret;
 
     Check_Type(obj, T_STRING);
-    from = StringValuePtr(obj);
+    from = (unsigned char*)StringValuePtr(obj);
 
-    to = (char *) PQunescapeBytea(from, &to_len);
+    to = PQunescapeBytea(from, &to_len);
 
-    ret = rb_str_new(to, to_len);
+    ret = rb_str_new((char*)to, to_len);
     OBJ_INFECT(ret, obj);
     PQfreemem(to);
 
@@ -909,7 +919,6 @@ pgconn_get_notify(obj)
     return ary;
 }
 
-static VALUE pg_escape_regex;
 static VALUE pg_escape_str;
 static ID    pg_gsub_bang_id;
 
@@ -964,7 +973,8 @@ pgconn_insert_table(obj, table, values)
                 rb_str_cat(buffer, "\\N",2);
             } else {
                 s = rb_obj_as_string(row->ptr[j]);
-                rb_funcall(s,pg_gsub_bang_id,2,pg_escape_regex,pg_escape_str);
+                rb_funcall(s,pg_gsub_bang_id,2,
+					rb_str_new("([\\t\\n\\\\])", 10),pg_escape_str);
                 rb_str_cat(buffer, StringValuePtr(s), RSTRING_LEN(s));
             }
         }
@@ -1351,7 +1361,7 @@ pgconn_set_client_encoding(obj, str)
 {
     Check_Type(str, T_STRING);
     if ((PQsetClientEncoding(get_pgconn(obj), StringValuePtr(str))) == -1){
-        rb_raise(rb_ePGError, "invalid encoding name %s",str);
+        rb_raise(rb_ePGError, "invalid encoding name: %s",StringValuePtr(str));
     }
     return Qnil;
 }
@@ -1882,76 +1892,6 @@ pgresult_getisnull(obj, tup_num, field_num)
 
 /*
  * call-seq:
- *    res.print( file, opt )
- *
- * MISSING: Documentation
- */
-static VALUE
-pgresult_print(obj, file, opt)
-    VALUE obj, file, opt;
-{
-    VALUE value;
-    ID mem;
-    OpenFile* fp;
-    PQprintOpt po;
-
-    Check_Type(file, T_FILE);
-    Check_Type(opt,  T_STRUCT);
-    GetOpenFile(file, fp);
-
-    memset(&po, 0, sizeof(po));
-
-    mem = rb_intern("header");
-    value = rb_struct_getmember(opt, mem);
-    po.header = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("align");
-    value = rb_struct_getmember(opt, mem);
-    po.align = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("standard");
-    value = rb_struct_getmember(opt, mem);
-    po.standard = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("html3");
-    value = rb_struct_getmember(opt, mem);
-    po.html3 = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("expanded");
-    value = rb_struct_getmember(opt, mem);
-    po.expanded = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("pager");
-    value = rb_struct_getmember(opt, mem);
-    po.pager = value == Qtrue ? 1 : 0;
-
-    mem = rb_intern("fieldSep");
-    value = rb_struct_getmember(opt, mem);
-    if (!NIL_P(value)) {
-        Check_Type(value, T_STRING);
-        po.fieldSep = StringValuePtr(value);
-    }
-
-    mem = rb_intern("tableOpt");
-    value = rb_struct_getmember(opt, mem);
-    if (!NIL_P(value)) {
-        Check_Type(value, T_STRING);
-        po.tableOpt = StringValuePtr(value);
-    }
-
-    mem = rb_intern("caption");
-    value = rb_struct_getmember(opt, mem);
-    if (!NIL_P(value)) {
-        Check_Type(value, T_STRING);
-        po.caption = StringValuePtr(value);
-    }
-
-    PQprint(fp->f2?fp->f2:fp->f, get_pgresult(obj), &po);
-    return obj;
-}
-
-/*
- * call-seq:
  *    res.cmdtuples()
  *
  * Returns the number of tuples (rows) affected by the SQL command.
@@ -2332,28 +2272,27 @@ pglarge_read(argc, argv, obj)
     VALUE *argv;
     VALUE obj;
 {
-    int len;
-    PGlarge *pglarge = get_pglarge(obj);
-    VALUE str;
-    VALUE length;
-    
-    rb_scan_args(argc, argv, "01", &length);
-    if (NIL_P(length)) {
-        return loread_all(obj);
-    }
-    
-    len = NUM2INT(length);
-    if (len < 0){
-        rb_raise(rb_ePGError,"nagative length %d given", len);
-    }
-    str = rb_tainted_str_new(0,len);
+	int len;
+	PGlarge *pglarge = get_pglarge(obj);
+	VALUE length;
+	char *buffer;
 
-    if((len = lo_read(pglarge->pgconn, pglarge->lo_fd, StringValuePtr(str), len)) < 0) {
-        rb_raise(rb_ePGError, "error while reading");
-    }
-    if (len == 0) return Qnil;
-    RSTRING_LEN(str) = len;
-    return str;
+	rb_scan_args(argc, argv, "01", &length);
+	if (NIL_P(length)) {
+		return loread_all(obj);
+	}
+
+	len = NUM2INT(length);
+	if (len < 0){
+		rb_raise(rb_ePGError,"nagative length %d given", len);
+	}
+	buffer = ALLOCA_N(char, len);
+
+	if((len = lo_read(pglarge->pgconn, pglarge->lo_fd, buffer, len)) < 0) {
+		rb_raise(rb_ePGError, "error while reading");
+	}
+	if (len == 0) return Qnil;
+	return rb_str_new(buffer,len);
 }
 
 /*
@@ -2672,8 +2611,6 @@ void
 Init_postgres()
 {
     pg_gsub_bang_id = rb_intern("gsub!");
-    pg_escape_regex = rb_reg_new("([\\t\\n\\\\])", 10, 0);
-    rb_global_variable(&pg_escape_regex);
     pg_escape_str = rb_str_new("\\\\\\1", 4);
     rb_global_variable(&pg_escape_str);
 
@@ -2815,7 +2752,6 @@ Init_postgres()
     rb_define_method(rb_cPGresult, "cmdtuples", pgresult_cmdtuples, 0);
     rb_define_method(rb_cPGresult, "cmdstatus", pgresult_cmdstatus, 0);
     rb_define_method(rb_cPGresult, "oid", pgresult_oid, 0);
-    rb_define_method(rb_cPGresult, "print", pgresult_print, 2);
     rb_define_method(rb_cPGresult, "clear", pgresult_clear, 0);
     rb_define_alias(rb_cPGresult, "close", "clear");
 

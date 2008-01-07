@@ -9,9 +9,18 @@
 #include "libpq-fe.h"
 #include "libpq/libpq-fs.h"              /* large-object interface */
 
+
+#ifndef HAVE_PQCONNECTIONUSEDPASSWORD
+#define POSTGRES_BEFORE_83
+#endif
+
 #if RUBY_VERSION_CODE < 180
 #define rb_check_string_type(x) rb_check_convert_type(x, T_STRING, "String", "to_str")
 #endif /* RUBY_VERSION_CODE < 180 */
+
+#ifndef RARRAY_LEN
+#define RARRAY_LEN(x) RARRAY((x))->len
+#endif /* RARRAY_LEN */
 
 #ifndef RSTRING_LEN
 #define RSTRING_LEN(x) RSTRING((x))->len
@@ -25,9 +34,18 @@
 #define StringValuePtr(x) STR2CSTR(x)
 #endif /* StringValuePtr */
 
+#ifdef POSTGRES_BEFORE_83
 #ifndef HAVE_PG_ENCODING_TO_CHAR
 #define pg_encoding_to_char(x) "SQL_ASCII"
+#else
+ /* Some versions ofPostgreSQL prior to 8.3 define
+  * pg_encoding_to_char but do not declare it
+  * in a header file, so this declaration will
+  * eliminate an unecessary warning
+  */
+extern char* pg_encoding_to_char(int);
 #endif /* HAVE_PG_ENCODING_TO_CHAR */
+#endif /* POSTGRES_BEFORE_83 */
 
 #ifndef PG_DIAG_INTERNAL_POSITION
 #define PG_DIAG_INTERNAL_POSITION 'p'
@@ -71,6 +89,10 @@ PGresult * PQdescribePrepared(PGconn *conn, const char *stmtName);
 PGresult * PQdescribePortal(PGconn *conn, const char *portalName);
 #endif /* HAVE_PQDESCRIBEPORTAL */
 
+#ifndef HAVE_PQCONNECTIONNEEDSPASSWORD
+int PQconnectionNeedsPassword(PGconn *conn);
+#endif /* HAVE_PQCONNECTIONNEEDSPASSWORD */
+
 #ifndef HAVE_PQCONNECTIONUSEDPASSWORD
 int PQconnectionUsedPassword(PGconn *conn);
 #endif /* HAVE_PQCONNECTIONUSEDPASSWORD */
@@ -113,6 +135,11 @@ int PQsendDescribePrepared(PGconn *conn, const char *stmtName);
 #ifndef HAVE_PQSENDDESCRIBEPORTAL
 int PQsendDescribePortal(PGconn *conn, const char *portalName);
 #endif /* HAVE_PQSENDDESCRIBEPORTAL */
+
+#ifndef HAVE_PQSENDPREPARE
+int PQsendPrepare(PGconn *conn, const char *stmtName, const char *query,
+	int nParams, const Oid *paramTypes);
+#endif /* HAVE_PQSENDPREPARE */
 
 #ifndef HAVE_PQENCRYPTPASSWORD
 char *PQencryptPassword(const char *passwd, const char *user);

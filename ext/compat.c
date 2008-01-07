@@ -55,6 +55,15 @@ PQprepare(PGconn *conn, const char *stmtName, const char *query,
 }
 #endif /* HAVE_PQPREPARE */
 
+#ifndef HAVE_PQCONNECTIONNEEDSPASSWORD
+int
+PQconnectionNeedsPassword(PGconn *conn)
+{
+	rb_raise(rb_eStandardError, 
+		"PQconnectionNeedsPassword not supported by this client version.");
+}
+#endif /* HAVE_PQCONNECTIONUSEDPASSWORD */
+
 #ifndef HAVE_PQCONNECTIONUSEDPASSWORD
 int
 PQconnectionUsedPassword(PGconn *conn)
@@ -127,6 +136,15 @@ PQsendDescribePortal(PGconn *conn, const char *portalName)
 	rb_raise(rb_eStandardError, "PQsendDescribePortal not supported by this client version.");
 }
 #endif /* HAVE_PQSENDDESCRIBEPORTAL */
+
+#ifndef HAVE_PQSENDPREPARE
+int
+PQsendPrepare(PGconn *conn, const char *stmtName, const char *query,
+	int nParams, const Oid *paramTypes)
+{
+	rb_raise(rb_eStandardError, "PQsendPrepare not supported by this client version.");
+}
+#endif /* HAVE_PQSENDPREPARE */
 
 #ifndef HAVE_PQENCRYPTPASSWORD
 char *

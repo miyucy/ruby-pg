@@ -27,11 +27,13 @@ desired_functions = %w(
 	PQescapeString
 	PQexecParams
 	PQconnectionUsedPassword
+	PQconnectionNeedsPassword
 	PQisthreadsafe
 	PQnparams
 	PQparamtype
 	PQsendDescribePrepared
 	PQsendDescribePortal
+	PQsendPrepare
 	PQencryptPassword
 	PQdescribePrepared
 	PQdescribePortal

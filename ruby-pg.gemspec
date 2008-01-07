@@ -16,6 +16,7 @@ SPEC = Gem::Specification.new do |s|
   s.homepage          = 'http://rubyforge.org/projects/ruby-pg'
   s.requirements      = 'PostgreSQL libpq library and headers'
   s.has_rdoc          = true
+  s.extra_rdoc_files = ['ext/pg.c']
 
   if File.exists? 'pg.so' and PLATFORM =~ /mingw|mswin/
     s.platform        = Gem::Platform::WIN32
