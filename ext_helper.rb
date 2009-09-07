@@ -12,7 +12,7 @@ def setup_extension(extension_name, gem_spec = nil)
   # getting this file is part of the compile task
   task :compile => ["ext/#{ext_name}"]
 
-  file "ext/#{ext_name}" => "ext/Makefile" do
+  file "ext/#{ext_name}" => FileList["ext/Makefile", "ext/*.c", "ext/*.h"] do
     # Visual C make utility is named 'nmake', MinGW conforms GCC 'make' standard.
     make_cmd = RUBY_PLATFORM =~ /mswin/ ? 'nmake' : 'make'
     Dir.chdir('ext') do
@@ -36,7 +36,7 @@ def setup_extension(extension_name, gem_spec = nil)
         # clear the extension (to avoid RubyGems firing the build process)
         gem_spec.extensions.clear
 
-        # add the precompiled binaries to the list of files 
+        # add the precompiled binaries to the list of files
         # (taken from compile task dependency)
         gem_spec.files += Rake::Task['compile'].prerequisites
       end
