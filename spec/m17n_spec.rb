@@ -2,6 +2,7 @@
 
 require 'rubygems'
 require 'spec'
+require File.join(File.dirname(__FILE__), 'spec_helper')
 
 $LOAD_PATH.unshift('ext')
 require 'pg'
@@ -14,26 +15,24 @@ describe "multinationalization support" do
 	before( :all ) do
 		if RUBY_VERSION_VEC >= MIN_RUBY_VERSION_VEC
 			puts "======  TESTING PGresult M17N  ======"
-			@test_directory = File.join(Dir.getwd, "tmp_test_#{rand}")
-			@test_pgdata = File.join(@test_directory, 'data')
-			if File.exists?(@test_directory) then
-				raise "test directory exists!"
+			unless @already_running = server_running?
+				server_build
+				server_start
 			end
-			@port = 54321
-			@conninfo = "host=localhost port=#{@port} dbname=test"
-			Dir.mkdir(@test_directory)
-			Dir.mkdir(@test_pgdata)
-			cmds = []
-			cmds << "initdb --no-locale -D \"#{@test_pgdata}\""
-			cmds << "pg_ctl -w -o \"-p #{@port}\" -D \"#{@test_pgdata}\" start"
-			cmds << "createdb -p #{@port} test"
 
-			cmds.each do |cmd|
-				if not system(cmd) then
-					raise "Error executing cmd: #{cmd}: #{$?}"
-				end
-			end
-			puts "\n\n"
+			@host = PGSQL_INF['host']
+			@port = PGSQL_INF['port']
+			@user = PGSQL_INF['user']
+			@pswd = PGSQL_INF['password']
+			@dbname = PGSQL_INF['dbname']
+
+			@conninfo = ''
+			@conninfo += "host=#{@host} " if @host
+			@conninfo += "port=#{@port} " if @port
+			@conninfo += "dbname=#{@dbname} " if @dbname
+			@conninfo += "user=#{@user} " if @user
+			@conninfo += "password=#{@password} " if @password
+
 			@conn = PGconn.connect(@conninfo)
 		end
 	end
@@ -121,13 +120,9 @@ describe "multinationalization support" do
 		if RUBY_VERSION_VEC >= MIN_RUBY_VERSION_VEC
 			puts ""
 			@conn.finish
-			cmds = []
-			cmds << "pg_ctl -D \"#{@test_pgdata}\" stop"
-			cmds << "rm -rf \"#{@test_directory}\""
-			cmds.each do |cmd|
-				if not system(cmd) then
-					raise "Error executing cmd: #{cmd}: #{$?}"
-				end
+			unless @already_running
+				server_stop
+				server_clean
 			end
 			puts "======  COMPLETED TESTING PGresult M17N  ======"
 			puts ""
