@@ -2753,7 +2753,7 @@ pgconn_loread(VALUE self, VALUE in_lo_desc, VALUE in_len)
 		return Qnil;
 	}
 
-	str = rb_tainted_str_new(buffer, len);
+	str = rb_tainted_str_new(buffer, ret);
 	xfree(buffer);
 
 	return str;
@@ -3101,7 +3101,7 @@ pgresult_fformat(VALUE self, VALUE column_number)
 {
 	PGresult *result = get_pgresult(self);
 	int fnumber = NUM2INT(column_number);
-	if (fnumber >= PQnfields(result)) {
+	if (fnumber < 0 || fnumber >= PQnfields(result)) {
 		rb_raise(rb_eArgError, "Column number is out of range: %d",
 			fnumber);
 	}
@@ -3141,7 +3141,7 @@ pgresult_fmod(VALUE self, VALUE column_number)
 	PGresult *result = get_pgresult(self);
 	int fnumber = NUM2INT(column_number);
 	int modifier;
-	if (fnumber >= PQnfields(result)) {
+	if (fnumber < 0 || fnumber >= PQnfields(result)) {
 		rb_raise(rb_eArgError, "Column number is out of range: %d",
 			fnumber);
 	}
@@ -3375,7 +3375,7 @@ pgresult_aref(VALUE self, VALUE index)
 	VALUE fname,val;
 	VALUE tuple;
 
-	if(tuple_num >= PQntuples(result))
+	if(tuple_num < 0 || tuple_num >= PQntuples(result))
 		rb_raise(rb_eIndexError, "Index %d is out of range", tuple_num);
 	tuple = rb_hash_new();
 	for(field_num = 0; field_num < PQnfields(result); field_num++) {
@@ -3947,7 +3947,7 @@ Init_pg()
 	rb_define_method(rb_cPGresult, "getisnull", pgresult_getisnull, 2);
 	rb_define_method(rb_cPGresult, "getlength", pgresult_getlength, 2);
 	rb_define_method(rb_cPGresult, "nparams", pgresult_nparams, 0);
-	rb_define_method(rb_cPGresult, "paramtype", pgresult_paramtype, 0);
+	rb_define_method(rb_cPGresult, "paramtype", pgresult_paramtype, 1);
 	rb_define_method(rb_cPGresult, "cmd_status", pgresult_cmd_status, 0);
 	rb_define_method(rb_cPGresult, "cmd_tuples", pgresult_cmd_tuples, 0);
 	rb_define_alias(rb_cPGresult, "cmdtuples", "cmd_tuples");
