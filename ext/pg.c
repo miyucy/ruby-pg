@@ -2428,6 +2428,48 @@ pgconn_s_quote_ident(VALUE self, VALUE in_str)
 	return ret;
 }
 
+/*
+ * call-seq:
+ *    conn.wait( [ timeout ] ) -> Boolean
+ *
+ * Blocks until data is available on the socket, or until the
+ * optional _timeout_ is reached, whichever comes first.
+ * _timeout_ is measured in seconds and can be fractional.
+ *
+ * Returns +false+ if _timeout_ is reached, +true+ otherwise.
+ *
+ * This method can be used in conjuction with NOTIFY/LISTEN to
+ * facilitate asynchronous notification.
+ */
+static VALUE
+pgconn_wait(int argc, VALUE *argv, VALUE self)
+{
+	PGconn *conn = get_pgconn(self);
+	int sd = PQsocket(conn);
+	int ret;
+	struct timeval timeout;
+	struct timeval *ptimeout = NULL;
+	VALUE timeout_in;
+	double timeout_sec;
+	fd_set sd_rset;
+
+	if (rb_scan_args(argc, argv, "01", &timeout_in) == 1) {
+		timeout_sec = NUM2DBL(timeout_in);
+		timeout.tv_sec = (long)timeout_sec;
+		timeout.tv_usec = (long)((timeout_sec - (long)timeout_sec) * 1e6);
+		ptimeout = &timeout;
+	}
+
+	FD_ZERO(&sd_rset);
+	FD_SET(sd, &sd_rset);
+	ret = rb_thread_select(sd+1, &sd_rset, NULL, NULL, ptimeout);
+	/* if select() times out, return false */
+	if(ret == 0)
+		return Qfalse;
+	PQconsumeInput(conn);
+
+	return Qtrue;
+}
 
 /*
  * call-seq:
@@ -3819,6 +3861,7 @@ Init_pg()
 	rb_define_method(rb_cPGconn, "get_client_encoding", pgconn_get_client_encoding, 0);
 	rb_define_method(rb_cPGconn, "set_client_encoding", pgconn_set_client_encoding, 1);
 	rb_define_method(rb_cPGconn, "transaction", pgconn_transaction, 0);
+	rb_define_method(rb_cPGconn, "wait", pgconn_wait, -1);
 	rb_define_method(rb_cPGconn, "block", pgconn_block, -1);
 	rb_define_method(rb_cPGconn, "quote_ident", pgconn_s_quote_ident, 1);
 	rb_define_method(rb_cPGconn, "async_exec", pgconn_async_exec, -1);
