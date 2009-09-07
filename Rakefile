@@ -104,3 +104,40 @@ task :spec => [:compile]
 
 desc "Run all specs in spec directory"
 task :default => :spec
+
+namespace :server do
+  require 'spec/spec_helper'
+  pg_data = File.join(File.dirname(__FILE__), 'server', 'data')
+
+  desc "start PostgreSQL server"
+  task :start => :build do
+    server_start pg_data
+  end
+
+  desc "stop PostgreSQL server"
+  task :stop do
+    server_stop pg_data
+  end
+
+  desc "restart PostgreSQL server"
+  task :restart => :build do
+    server_stop pg_data
+    server_start pg_data
+  end
+
+  desc "build PostgreSQL server"
+  task :build do
+    server_build pg_data
+  end
+
+  desc "clean PostgreSQL server"
+  task :clean => :stop do
+    server_clean pg_data
+  end
+
+  desc "rebuild PostgreSQL server"
+  task :rebuild do
+    server_clean pg_data
+    server_build pg_data
+  end
+end

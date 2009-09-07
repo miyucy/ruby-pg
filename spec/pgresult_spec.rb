@@ -10,26 +10,24 @@ describe PGconn do
 
 	before( :all ) do
 		puts "======  TESTING PGresult  ======"
-		@test_directory = File.join(Dir.getwd, "tmp_test_#{rand}")
-		@test_pgdata = File.join(@test_directory, 'data')
-		if File.exists?(@test_directory) then
-			raise "test directory exists!"
+		unless @already_running = server_running?
+			server_build
+			server_start
 		end
-		@port = 54321
-		@conninfo = "host=localhost port=#{@port} dbname=test"
-		Dir.mkdir(@test_directory)
-		Dir.mkdir(@test_pgdata)
-		cmds = []
-		cmds << "initdb --no-locale -D \"#{@test_pgdata}\""
-		cmds << "pg_ctl -w -o \"-p #{@port}\" -D \"#{@test_pgdata}\" start"
-		cmds << "createdb -p #{@port} test"
 
-		cmds.each do |cmd|
-			if not system(cmd) then
-				raise "Error executing cmd: #{cmd}: #{$?}"
-			end
-		end
-		puts "\n\n"
+		@host = PGSQL_INF['host']
+		@port = PGSQL_INF['port']
+		@user = PGSQL_INF['user']
+		@pswd = PGSQL_INF['password']
+		@dbname = PGSQL_INF['dbname']
+
+		@conninfo = ''
+		@conninfo += "host=#{@host} " if @host
+		@conninfo += "port=#{@port} " if @port
+		@conninfo += "dbname=#{@dbname} " if @dbname
+		@conninfo += "user=#{@user} " if @user
+		@conninfo += "password=#{@password} " if @password
+
 		@conn = PGconn.connect(@conninfo)
 	end
 
@@ -58,7 +56,7 @@ describe PGconn do
 	it "should return the same bytes in binary format that are sent in binary format" do
 		binary_file = File.join(Dir.pwd, 'spec/data', 'random_binary_data')
 		bytes = File.open(binary_file, 'rb').read
-		res = @conn.exec('VALUES ($1::bytea)', 
+		res = @conn.exec('VALUES ($1::bytea)',
 			[ { :value => bytes, :format => 1 } ], 1)
 		res[0]['column1'].should== bytes
 	end
@@ -78,7 +76,7 @@ describe PGconn do
 	it "should return the same bytes in text format that are sent in binary format" do
 		binary_file = File.join(Dir.pwd, 'spec/data', 'random_binary_data')
 		bytes = File.open(binary_file, 'rb').read
-		res = @conn.exec('VALUES ($1::bytea)', 
+		res = @conn.exec('VALUES ($1::bytea)',
 			[ { :value => bytes, :format => 1 } ])
 		PGconn.unescape_bytea(res[0]['column1']).should== bytes
 	end
@@ -99,13 +97,9 @@ describe PGconn do
 	after( :all ) do
 		puts ""
 		@conn.finish
-		cmds = []
-		cmds << "pg_ctl -D \"#{@test_pgdata}\" stop"
-		cmds << "rm -rf \"#{@test_directory}\""
-		cmds.each do |cmd|
-			if not system(cmd) then
-				raise "Error executing cmd: #{cmd}: #{$?}"
-			end
+		unless @already_running
+			server_stop
+			server_clean
 		end
 		puts "======  COMPLETED TESTING PGresult  ======"
 		puts ""

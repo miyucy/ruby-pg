@@ -1,5 +1,6 @@
 require 'rubygems'
 require 'spec'
+require File.join(File.dirname(__FILE__), 'spec_helper')
 
 $LOAD_PATH.unshift('ext')
 require 'pg'
@@ -8,25 +9,25 @@ describe PGconn do
 
 	before( :all ) do
 		puts "======  TESTING PGconn  ======"
-		@test_directory = File.join(Dir.getwd, "tmp_test_#{rand}")
-		@test_pgdata = File.join(@test_directory, 'data')
-		if File.exists?(@test_directory) then
-			raise "test directory exists!"
+		@test_directory = ENV['TMP'] || ENV['TEMP'] || "/tmp"
+		unless @already_running = server_running?
+			server_build
+			server_start
 		end
-		@port = 54321
-		@conninfo = "host=localhost port=#{@port} dbname=test"
-		Dir.mkdir(@test_directory)
-		Dir.mkdir(@test_pgdata)
-		cmds = []
-		cmds << "initdb --no-locale -D \"#{@test_pgdata}\""
-		cmds << "pg_ctl -w -o \"-p #{@port}\" -D \"#{@test_pgdata}\" start"
-		cmds << "createdb -p #{@port} test"
 
-		cmds.each do |cmd|
-			if not system(cmd) then
-				raise "Error executing cmd: #{cmd}: #{$?}"
-			end
-		end
+		@host = PGSQL_INF['host']
+		@port = PGSQL_INF['port']
+		@user = PGSQL_INF['user']
+		@pswd = PGSQL_INF['password']
+		@dbname = PGSQL_INF['dbname']
+
+		@conninfo = ''
+		@conninfo += "host=#{@host} " if @host
+		@conninfo += "port=#{@port} " if @port
+		@conninfo += "dbname=#{@dbname} " if @dbname
+		@conninfo += "user=#{@user} " if @user
+		@conninfo += "password=#{@password} " if @password
+
 		@conn = PGconn.connect(@conninfo)
 	end
 
@@ -37,16 +38,18 @@ describe PGconn do
 	end
 
 	it "should connect using 7 arguments converted to strings" do
-		tmpconn = PGconn.connect('localhost', @port, nil, nil, :test, nil, nil)
+		tmpconn = PGconn.connect(@host, @port, nil, nil, @dbname, @user, @password)
 		tmpconn.status.should== PGconn::CONNECTION_OK
 		tmpconn.finish
 	end
 
 	it "should connect using hash" do
 		tmpconn = PGconn.connect(
-			:host => 'localhost',
+			:host => @host,
 			:port => @port,
-			:dbname => :test)
+			:dbname => @dbname,
+			:user => @user,
+			:password => @password)
 		tmpconn.status.should== PGconn::CONNECTION_OK
 		tmpconn.finish
 	end
@@ -72,12 +75,15 @@ describe PGconn do
 	end
 
 	it "should not leave stale server connections after finish" do
+		before = @conn.exec(%[SELECT COUNT(*) AS n FROM pg_stat_activity WHERE usename IS NOT NULL])
+
 		PGconn.connect(@conninfo).finish
 		sleep 0.5
-		res = @conn.exec(%[SELECT COUNT(*) AS n FROM pg_stat_activity
-							WHERE usename IS NOT NULL])
+
+		after = @conn.exec(%[SELECT COUNT(*) AS n FROM pg_stat_activity WHERE usename IS NOT NULL])
+
 		# there's still the global @conn, but should be no more
-		res[0]['n'].should == '1'
+		before[0]['n'].should == after[0]['n']
 	end
 
 	unless RUBY_PLATFORM =~ /mswin|mingw/
@@ -102,26 +108,20 @@ describe PGconn do
 	end
 
 	it "should cancel a query" do
-		error = false
-		@conn.send_query("SELECT pg_sleep(1000)")
-		@conn.cancel
+		@conn.setnonblocking(true).should be_nil
+		@conn.isnonblocking.should be_true
+		@conn.send_query("SELECT pg_sleep(10)").should be_nil
+		@conn.cancel.should be_nil
 		tmpres = @conn.get_result
-		if(tmpres.result_status != PGresult::PGRES_TUPLES_OK)
-			error = true
-		end
-		error.should == true
+		(tmpres.result_status != PGresult::PGRES_TUPLES_OK).should be_true
 	end
 
 	after( :all ) do
 		puts ""
 		@conn.finish
-		cmds = []
-		cmds << "pg_ctl -D \"#{@test_pgdata}\" stop"
-		cmds << "rm -rf \"#{@test_directory}\""
-		cmds.each do |cmd|
-			if not system(cmd) then
-				raise "Error executing cmd: #{cmd}: #{$?}"
-			end
+		unless @already_running
+			server_stop
+			server_clean
 		end
 		puts "====== COMPLETED TESTING PGconn  ======"
 		puts ""
