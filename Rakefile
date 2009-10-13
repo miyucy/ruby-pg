@@ -114,19 +114,18 @@ namespace :server do
     server_start pg_data
   end
 
-  desc "stop PostgreSQL server"
-  task :stop do
-    server_stop pg_data
-  end
-
   desc "restart PostgreSQL server"
-  task :restart => :build do
-    server_stop pg_data
+  task :restart => :stop do
     server_start pg_data
   end
 
   desc "build PostgreSQL server"
-  task :build do
+  task :build => :clean do
+    server_build pg_data
+  end
+
+  desc "rebuild PostgreSQL server"
+  task :rebuild => :clean do
     server_build pg_data
   end
 
@@ -135,9 +134,8 @@ namespace :server do
     server_clean pg_data
   end
 
-  desc "rebuild PostgreSQL server"
-  task :rebuild do
-    server_clean pg_data
-    server_build pg_data
+  desc "stop PostgreSQL server"
+  task :stop do
+    server_stop pg_data
   end
 end
