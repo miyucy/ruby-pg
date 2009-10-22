@@ -113,6 +113,16 @@ describe PGconn do
 		error.should == true
 	end
 
+	it "should encrypt_password return String" do
+		PGconn.encrypt_password("postgres", "postgres").should be_instance_of String
+	end
+
+	it "should encrypt_password receive 2 Strings" do
+		lambda { PGconn.encrypt_password(nil, nil) }.should raise_error TypeError
+		lambda { PGconn.encrypt_password("postgres", nil) }.should raise_error TypeError
+		lambda { PGconn.encrypt_password(nil, "postgres") }.should raise_error TypeError
+	end
+
 	after( :all ) do
 		puts ""
 		@conn.finish
